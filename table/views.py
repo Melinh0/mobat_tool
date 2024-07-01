@@ -14,6 +14,7 @@ import numpy as np
 
 class DadosBancoAPIView(APIView):
     pagination_class = PageNumberPagination
+
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -22,14 +23,32 @@ class DadosBancoAPIView(APIView):
                 description="Escolha a tabela",
                 type=openapi.TYPE_STRING,
                 enum=[choice.name for choice in TableChoice]
+            ),
+            openapi.Parameter(
+                'column_choice',
+                openapi.IN_QUERY,
+                description="Coluna desejada",
+                type=openapi.TYPE_STRING,
+                enum=[
+                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                    'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+                ]
             )
         ]
     )
     def get(self, request):
         table_choice = request.query_params.get('table_choice')
+        column_choice = request.query_params.get('column_choice')
 
         if not table_choice:
             return Response({'error': 'Parâmetro table_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not column_choice:
+            return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             table_choice_enum = TableChoice[table_choice]
@@ -37,23 +56,27 @@ class DadosBancoAPIView(APIView):
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
                 raise KeyError
+            selected_database = table_name
         except KeyError:
-            return Response({'error': 'Opção de tabela inválida'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Opção de tabela inválida'}, status=400)
+
+        if column_choice not in [
+            'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+            'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+            'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+            'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+            'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+            'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+        ]:
+            return Response({'error': 'Coluna escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            data = cursor.execute(f"SELECT * FROM {table_name}").fetchall()
+            data = cursor.execute(f"SELECT {column_choice} FROM {table_name}").fetchall()
             conn.close()
 
-            df = pd.DataFrame(data, columns=[
-                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
-            ])
+            df = pd.DataFrame(data, columns=[column_choice])
 
             return Response({'dados': df.to_dict(orient='records')}, status=status.HTTP_200_OK)
 
