@@ -9,7 +9,9 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .filters import TableChoice
 from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif, mutual_info_regression
-from sklearn.linear_model import Lasso
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor
+from sklearn.linear_model import Lasso, ElasticNet
+from xgboost import XGBRegressor
 import numpy as np
 
 class DadosBancoAPIView(APIView):
@@ -37,12 +39,20 @@ class DadosBancoAPIView(APIView):
                     'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
                     'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
                 ]
+            ),
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description="Quantidade de dados a serem retornados",
+                type=openapi.TYPE_INTEGER,
+                required=False
             )
         ]
     )
     def get(self, request):
         table_choice = request.query_params.get('table_choice')
         column_choice = request.query_params.get('column_choice')
+        limit = request.query_params.get('limit')
 
         if not table_choice:
             return Response({'error': 'Parâmetro table_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -56,7 +66,6 @@ class DadosBancoAPIView(APIView):
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
                 raise KeyError
-            selected_database = table_name
         except KeyError:
             return Response({'error': 'Opção de tabela inválida'}, status=400)
 
@@ -73,12 +82,17 @@ class DadosBancoAPIView(APIView):
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            data = cursor.execute(f"SELECT {column_choice} FROM {table_name}").fetchall()
+            total_count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            
+            if limit:
+                data = cursor.execute(f"SELECT {column_choice} FROM {table_name} LIMIT ?", (int(limit),)).fetchall()
+            else:
+                data = cursor.execute(f"SELECT {column_choice} FROM {table_name}").fetchall()
             conn.close()
 
             df = pd.DataFrame(data, columns=[column_choice])
 
-            return Response({'dados': df.to_dict(orient='records')}, status=status.HTTP_200_OK)
+            return Response({'dados': df.to_dict(orient='records'), 'total_count': total_count}, status=status.HTTP_200_OK)
 
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -369,3 +383,261 @@ class FeatureSelectionAPIView(APIView):
 
         return [{'feature': key, 'score': value} for key, value in data.items()]
     
+class FeatureImportanceAPIView(APIView):
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                'table_choice',
+                openapi.IN_QUERY,
+                description="Escolha o banco de dados",
+                type=openapi.TYPE_STRING,
+                enum=[choice.name for choice in TableChoice]
+            ),
+            openapi.Parameter(
+                'model_type',
+                openapi.IN_QUERY,
+                description="Modelos para visualizar os dados de importância",
+                type=openapi.TYPE_STRING,
+                enum=['GradientBoostingRegressor', 'RandomForestRegressor', 'ExtraTreesRegressor', 'AdaBoostRegressor', 'XGBRegressor', 'ElasticNet']
+            )
+        ],
+        responses={200: 'Model selection data generated successfully'},
+    )
+    def post(self, request):
+        table_choice = request.query_params.get('table_choice')
+        model_type = request.query_params.get('model_type')
+
+        if not table_choice or not model_type:
+            return Response({'error': 'Parâmetros table_choice e model_type são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            table_choice_enum = TableChoice[table_choice]
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+        except KeyError:
+            return Response({'error': 'Opção de tabela inválida'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {table_name}")
+            data = cursor.fetchall()
+            conn.close()
+
+            columns = [
+                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+            ]
+            df = pd.DataFrame(data, columns=columns)
+
+            allowed_columns = [
+                'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_total_reports',
+                'abuseipdb_num_distinct_users', 'virustotal_reputation', 'harmless', 'malicious', 'suspicious',
+                'undetected', 'IBM_score', 'IBM_average_history_Score', 'IBM_most_common_score',
+                'score_average_Mobat'
+            ]
+            df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
+            selected_data = self.importance_ml(df_filtered, model_type)
+
+            return Response(selected_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype('category').cat.codes
+        return df
+
+    def importance_ml(self, df: pd.DataFrame, model_type: str):
+        if model_type == 'GradientBoostingRegressor':
+            model = GradientBoostingRegressor()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = model.feature_importances_
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        elif model_type == 'RandomForestRegressor':
+            model = RandomForestRegressor()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = model.feature_importances_
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        elif model_type == 'ExtraTreesRegressor':
+            model = ExtraTreesRegressor()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = model.feature_importances_
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        elif model_type == 'AdaBoostRegressor':
+            model = AdaBoostRegressor()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = model.feature_importances_
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        elif model_type == 'XGBRegressor':
+            model = XGBRegressor()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = model.feature_importances_
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        elif model_type == 'ElasticNet':
+            model = ElasticNet()
+            model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
+            feature_importances = np.abs(model.coef_)
+            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+
+        else:
+            raise ValueError("Model type not supported. Please choose a supported model.")
+
+        return [{'feature': key, 'importance': value} for key, value in data.items()]
+    
+class CountryScoreAverageView(APIView):
+    country_names = {
+        'US': 'Estados Unidos', 'CN': 'China', 'SG': 'Singapura', 'DE': 'Alemanha', 'VN': 'Vietnã',
+        'KR': 'Coreia do Sul', 'IN': 'Índia', 'RU': 'Rússia', 'LT': 'Lituânia', 'TW': 'Taiwan',
+        'GB': 'Reino Unido', 'JP': 'Japão', 'IR': 'Irã', 'BR': 'Brasil', 'AR': 'Argentina',
+        'NL': 'Holanda', 'TH': 'Tailândia', 'CA': 'Canadá', 'PK': 'Paquistão', 'ID': 'Indonésia',
+        'ET': 'Etiópia', 'FR': 'França', 'BG': 'Bulgária', 'PA': 'Panamá', 'SA': 'Arábia Saudita',
+        'BD': 'Bangladesh', 'HK': 'Hong Kong', 'MA': 'Marrocos', 'EG': 'Egito', 'UA': 'Ucrânia',
+        'MX': 'México', 'UZ': 'Uzbequistão', 'ES': 'Espanha', 'AU': 'Austrália', 'CO': 'Colômbia',
+        'KZ': 'Cazaquistão', 'EC': 'Equador', 'BZ': 'Belize', 'SN': 'Senegal', 'None': 'None',
+        'IE': 'Irlanda', 'FI': 'Finlândia', 'ZA': 'África do Sul', 'IT': 'Itália', 'PH': 'Filipinas',
+        'CR': 'Costa Rica', 'CH': 'Suíça'
+    }
+    
+    country_codes = {v: k for k, v in country_names.items()}
+
+    def calculate_country_score_average(self, df):
+        global_avg_scores = df.groupby('abuseipdb_country_code')['score_average_Mobat'].mean().sort_index()
+        return global_avg_scores
+    
+    def calculate_ip_counts(self, df):
+        ip_counts = df['abuseipdb_country_code'].value_counts().sort_index()
+        return ip_counts
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                'table_choice',
+                openapi.IN_QUERY,
+                description="Escolha o banco de dados",
+                type=openapi.TYPE_STRING,
+                enum=[choice.name for choice in TableChoice]
+            ),
+            openapi.Parameter(
+                'country',
+                openapi.IN_QUERY,
+                description="Nome do país para visualizar a média do Score Average Mobat ou quantidade de endereços de IP ('Todos' para todos os países)",
+                type=openapi.TYPE_STRING,
+                enum=['Todos'] + list(country_names.values())
+            ),
+            openapi.Parameter(
+                'metric',
+                openapi.IN_QUERY,
+                description="Métrica a ser visualizada: 'average' para média do score ou 'count' para contagem de registros de endereços IP",
+                type=openapi.TYPE_STRING,
+                enum=['average', 'count']
+            )
+        ],
+        responses={200: openapi.Response('Dados gerados com sucesso', schema=openapi.Schema(type=openapi.TYPE_OBJECT))}
+    )
+    def post(self, request, *args, **kwargs):
+        table_choice = request.query_params.get('table_choice')
+        country = request.query_params.get('country')
+        metric = request.query_params.get('metric')
+
+        if not table_choice:
+            return Response({'error': 'O parâmetro table_choice é obrigatório'}, status=400)
+
+        if not metric:
+            return Response({'error': 'O parâmetro metric é obrigatório'}, status=400)
+
+        try:
+            table_choice_enum = TableChoice[table_choice]
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+        except KeyError:
+            return Response({'error': 'Opção de tabela inválida'}, status=400)
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {table_name}")
+            data = cursor.fetchall()
+            conn.close()
+
+            columns = [
+                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+            ]
+            df = pd.DataFrame(data, columns=columns)
+
+            response_data = {}
+
+            if metric == 'average':
+                if country and country != 'None':
+                    if country == 'Todos':
+                        country_avg_scores = self.calculate_country_score_average(df)
+                        mean_country_avg_score = np.mean(list(country_avg_scores.values))
+                        response_data['Média das médias dos países'] = mean_country_avg_score
+                        for country_code, country_name in self.country_names.items():
+                            response_data[country_name] = country_avg_scores.get(country_code, 0)
+                    else:
+                        country_code = self.country_codes.get(country)
+                        if country_code is None:
+                            return Response({'error': f'País "{country}" não encontrado'}, status=400)
+                        
+                        filtered_df = df[df['abuseipdb_country_code'] == country_code]
+                        if filtered_df.empty:
+                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=404)
+                        
+                        country_avg_scores = filtered_df['score_average_Mobat'].mean()
+                        response_data[country] = country_avg_scores
+
+                else:
+                    global_avg_scores = df['score_average_Mobat'].mean()
+                    response_data['Global'] = global_avg_scores
+
+            elif metric == 'count':
+                if country and country != 'None':
+                    if country == 'Todos':
+                        ip_counts = self.calculate_ip_counts(df)
+                        mean_ip_count = np.mean(list(ip_counts.values))
+                        response_data['Média das quantidades de endereços IP'] = mean_ip_count
+                        for country_code, country_name in self.country_names.items():
+                            response_data[country_name] = ip_counts.get(country_code, 0)
+                    else:
+                        country_code = self.country_codes.get(country)
+                        if country_code is None:
+                            return Response({'error': f'País "{country}" não encontrado'}, status=400)
+                        
+                        filtered_df = df[df['abuseipdb_country_code'] == country_code]
+                        if filtered_df.empty:
+                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=404)
+                        
+                        ip_count = filtered_df.shape[0]
+                        response_data[country] = ip_count
+
+            else:
+                return Response({'error': 'Métrica inválida. Use "average" ou "count"'}, status=400)
+
+            return Response(response_data)
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    def get(self, request, *args, **kwargs):
+        return Response({'error': 'Método não suportado'}, status=405)
