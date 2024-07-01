@@ -112,12 +112,19 @@ class MapeamentoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ação a ser executada",
                 type=openapi.TYPE_STRING,
-                enum=['Mapear Feature', 'Baixar Todas as Features Mapeadas']
+                enum=['Mapear Feature', 'Baixar Todas as Features Mapeadas', 'Mapear Feature por Feature']
             ),
             openapi.Parameter(
                 'feature',
                 openapi.IN_QUERY,
                 description="Feature a ser mapeada",
+                type=openapi.TYPE_STRING,
+                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat']
+            ),
+            openapi.Parameter(
+                'feature_to_count',
+                openapi.IN_QUERY,
+                description="Feature a ser contada com base na primeira feature",
                 type=openapi.TYPE_STRING,
                 enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat']
             )
@@ -127,6 +134,7 @@ class MapeamentoFeaturesAPIView(APIView):
         table_choice = request.query_params.get('table_choice')
         action = request.query_params.get('action')
         feature = request.query_params.get('feature')
+        feature_to_count = request.query_params.get('feature_to_count')
 
         if not table_choice or not action:
             return Response({'error': 'Parâmetros table_choice e action são obrigatórios'}, status=400)
@@ -142,32 +150,51 @@ class MapeamentoFeaturesAPIView(APIView):
             return Response({'error': 'Opção de tabela inválida'}, status=400)
 
         if action == 'Mapear Feature' and feature:
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                data = cursor.execute(f"SELECT {feature} FROM {table_name}").fetchall()
-                values = [row[0] for row in data]
-                return Response({'feature_values': values})
-            except Exception as e:
-                return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=500)
-
+            return self.map_feature(db_path, table_name, feature)
         elif action == 'Baixar Todas as Features Mapeadas':
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                data = cursor.execute(f"SELECT * FROM {table_name}").fetchall()
-                df = pd.DataFrame(data, columns=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'])
-                mapeamento = {}
-                for coluna in df.columns:
-                    contagem_valores = df[coluna].value_counts().reset_index()
-                    contagem_valores.columns = [coluna, 'Quantidade']
-                    sheet_name = coluna[:31]
-                    mapeamento[coluna] = {'contagem_valores': contagem_valores, 'sheet_name': sheet_name}
-                return Response({'mapeamento_features': mapeamento})
-            except Exception as e:
-                return Response({'error': f'Erro ao baixar todas as features mapeadas: {str(e)}'}, status=500)
+            return self.download_all_mapped_features(db_path, table_name)
+        elif action == 'Mapear Feature por Feature' and feature and feature_to_count:
+            return self.map_feature_by_feature(db_path, table_name, feature, feature_to_count)
 
         return Response({'error': 'Ação inválida ou parâmetros ausentes'}, status=400)
+
+    def map_feature(self, db_path, table_name, feature):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            data = cursor.execute(f"SELECT {feature} FROM {table_name}").fetchall()
+            values = [row[0] for row in data]
+            return Response({'feature_values': values})
+        except Exception as e:
+            return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=500)
+
+    def download_all_mapped_features(self, db_path, table_name):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            data = cursor.execute(f"SELECT * FROM {table_name}").fetchall()
+            df = pd.DataFrame(data, columns=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'])
+            mapeamento = {}
+            for coluna in df.columns:
+                contagem_valores = df[coluna].value_counts().reset_index()
+                contagem_valores.columns = [coluna, 'Quantidade']
+                sheet_name = coluna[:31]
+                mapeamento[coluna] = {'contagem_valores': contagem_valores, 'sheet_name': sheet_name}
+            return Response({'mapeamento_features': mapeamento})
+        except Exception as e:
+            return Response({'error': f'Erro ao baixar todas as features mapeadas: {str(e)}'}, status=500)
+
+    def map_feature_by_feature(self, db_path, table_name, feature, feature_to_count):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            data = cursor.execute(f"SELECT {feature}, {feature_to_count} FROM {table_name}").fetchall()
+            df = pd.DataFrame(data, columns=[feature, feature_to_count])
+            feature_count = df.groupby(feature)[feature_to_count].apply(list).reset_index()
+            feature_count.columns = [feature, f'Valores de {feature_to_count}']
+            return Response({'feature_count': feature_count.to_dict(orient='records')})
+        except Exception as e:
+            return Response({'error': f'Erro ao relacionar os valores das features: {str(e)}'}, status=500)
 
 class ClusterizacaoAPIView(APIView):
     pagination_class = PageNumberPagination
