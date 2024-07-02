@@ -81,21 +81,21 @@ DATABASES = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     },
-    'db1': {
+    'PrimeiroSemestre': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'table/Seasons/PrimeiroSemestre.sqlite',
+        'NAME': BASE_DIR / 'mobat_tool/Seasons/PrimeiroSemestre.sqlite',
     },
-    'db2': {
+    'SegundoSemestre': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'table/Seasons/SegundoSemestre.sqlite',
+        'NAME': BASE_DIR / 'mobat_tool/Seasons/SegundoSemestre.sqlite',
     },
-    'db3': {
+    'TerceiroSemestre': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'table/Seasons/TerceiroSemestre.sqlite',
+        'NAME': BASE_DIR / 'mobat_tool/Seasons/TerceiroSemestre.sqlite',
     },
-    'db4': {
+    'Total': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'table/Seasons/Total.sqlite',
+        'NAME': BASE_DIR / 'mobat_tool/Seasons/Total.sqlite',
     },
 }
 

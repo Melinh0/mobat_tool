@@ -666,5 +666,5 @@ class CountryScoreAverageView(APIView):
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
-    def get(self, request, *args, **kwargs):
-        return Response({'error': 'Método não suportado'}, status=405)
+    # def get(self, request, *args, **kwargs):
+    #     return Response({'error': 'Método não suportado'}, status=405)

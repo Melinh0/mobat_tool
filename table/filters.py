@@ -1,4 +1,5 @@
 from enum import Enum
+from django.conf import settings
 
 class TableChoice(Enum):
     PRIMEIRO_SEMESTRE = 'PrimeiroSemestre'
@@ -9,13 +10,16 @@ class TableChoice(Enum):
     @classmethod
     def choices(cls):
         return [(key.name, key.value) for key in cls]
-    
+
     @classmethod
     def get_db_path(cls, choice):
+        databases = settings.DATABASES
+        
         mapping = {
-            'PrimeiroSemestre': 'table/Seasons/PrimeiroSemestre.sqlite',
-            'SegundoSemestre': 'table/Seasons/SegundoSemestre.sqlite',
-            'TerceiroSemestre': 'table/Seasons/TerceiroSemestre.sqlite',
-            'Total': 'table/Seasons/Total.sqlite',
+            'PrimeiroSemestre': databases['PrimeiroSemestre']['NAME'],
+            'SegundoSemestre': databases['SegundoSemestre']['NAME'],
+            'TerceiroSemestre': databases['TerceiroSemestre']['NAME'],
+            'Total': databases['Total']['NAME'],
         }
+        
         return mapping.get(choice)

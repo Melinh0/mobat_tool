@@ -1,5 +1,22 @@
 from rest_framework import serializers
+from .models import PrimeiroSemestre, SegundoSemestre, TerceiroSemestre, Total
 
-class TableDataSerializer(serializers.Serializer):
-    columns = serializers.ListField(child=serializers.CharField())
-    rows = serializers.ListField(child=serializers.ListField())
+class PrimeiroSemestreSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PrimeiroSemestre  
+        fields = '__all__'  
+
+class SegundoSemestreSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SegundoSemestre  
+        fields = '__all__' 
+
+class TerceiroSemestreSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TerceiroSemestre 
+        fields = '__all__'  
+
+class TotalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Total 
+        fields = '__all__'  
