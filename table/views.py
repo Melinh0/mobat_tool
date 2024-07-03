@@ -17,15 +17,33 @@ import numpy as np
 class DadosBancoAPIView(APIView):
     pagination_class = PageNumberPagination
 
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT substr(Time, 1, 7) AS year_month FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years_months = [row[0] for row in result]
+
+            return available_years_months
+
+        except Exception as e:
+            print(f'Erro ao obter anos e meses disponíveis: {str(e)}')
+            return []
+
     @swagger_auto_schema(
         manual_parameters=[
-            openapi.Parameter(
-                'table_choice',
-                openapi.IN_QUERY,
-                description="Escolha a tabela",
-                type=openapi.TYPE_STRING,
-                enum=[choice.name for choice in TableChoice]
-            ),
             openapi.Parameter(
                 'column_choice',
                 openapi.IN_QUERY,
@@ -37,37 +55,40 @@ class DadosBancoAPIView(APIView):
                     'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
                     'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
                     'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
                 ]
             ),
             openapi.Parameter(
-                'limit',
+                'year',
                 openapi.IN_QUERY,
-                description="Quantidade de dados a serem retornados",
+                description="Ano para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Mês para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Dia para filtrar os dados",
                 type=openapi.TYPE_INTEGER,
                 required=False
             )
         ]
     )
     def get(self, request):
-        table_choice = request.query_params.get('table_choice')
         column_choice = request.query_params.get('column_choice')
-        limit = request.query_params.get('limit')
-
-        if not table_choice:
-            return Response({'error': 'Parâmetro table_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+        year = request.query_params.get('year')
+        month = request.query_params.get('month')
+        day = request.query_params.get('day')
 
         if not column_choice:
             return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            table_choice_enum = TableChoice[table_choice]
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-        except KeyError:
-            return Response({'error': 'Opção de tabela inválida'}, status=400)
 
         if column_choice not in [
             'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -75,28 +96,42 @@ class DadosBancoAPIView(APIView):
             'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
             'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
             'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-            'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+            'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
         ]:
             return Response({'error': 'Coluna escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            total_count = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-            
-            if limit:
-                data = cursor.execute(f"SELECT {column_choice} FROM {table_name} LIMIT ?", (int(limit),)).fetchall()
+
+            if year and month and day:
+                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                query_params = [f"{year}-{month:02}-{day:02}"]
+            elif year and month:
+                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                query_params = [f"{year}-{month:02}"]
+            elif year:
+                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                query_params = [f"{year}"]
             else:
-                data = cursor.execute(f"SELECT {column_choice} FROM {table_name}").fetchall()
+                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = cursor.execute(query, query_params).fetchall()
             conn.close()
 
             df = pd.DataFrame(data, columns=[column_choice])
 
-            return Response({'dados': df.to_dict(orient='records'), 'total_count': total_count}, status=status.HTTP_200_OK)
+            return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
 
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
 class MapeamentoFeaturesAPIView(APIView):
     @swagger_auto_schema(
         manual_parameters=[
@@ -119,14 +154,14 @@ class MapeamentoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Feature a ser mapeada",
                 type=openapi.TYPE_STRING,
-                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat']
+                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time']
             ),
             openapi.Parameter(
                 'feature_to_count',
                 openapi.IN_QUERY,
                 description="Feature a ser contada com base na primeira feature",
                 type=openapi.TYPE_STRING,
-                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat']
+                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time']
             )
         ]
     )
@@ -173,7 +208,7 @@ class MapeamentoFeaturesAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             data = cursor.execute(f"SELECT * FROM {table_name}").fetchall()
-            df = pd.DataFrame(data, columns=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'])
+            df = pd.DataFrame(data, columns=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'])
             mapeamento = {}
             for coluna in df.columns:
                 contagem_valores = df[coluna].value_counts().reset_index()
