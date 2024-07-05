@@ -4,7 +4,6 @@ from sklearn.cluster import KMeans
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.pagination import PageNumberPagination
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .filters import TableChoice
@@ -15,8 +14,6 @@ from xgboost import XGBRegressor
 import numpy as np
 
 class DadosBancoAPIView(APIView):
-    pagination_class = PageNumberPagination
-
     @staticmethod
     def get_available_years_months():
         try:
@@ -29,17 +26,17 @@ class DadosBancoAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query = f"SELECT DISTINCT substr(Time, 1, 7) AS year_month FROM {table_name}"
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
             result = cursor.execute(query).fetchall()
 
             conn.close()
 
-            available_years_months = [row[0] for row in result]
+            available_years = [row[0] for row in result]
 
-            return available_years_months
+            return available_years
 
         except Exception as e:
-            print(f'Erro ao obter anos e meses disponíveis: {str(e)}')
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
             return []
 
     @swagger_auto_schema(
@@ -50,7 +47,7 @@ class DadosBancoAPIView(APIView):
                 description="Coluna desejada",
                 type=openapi.TYPE_STRING,
                 enum=[
-                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'all', 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
                     'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
                     'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
                     'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
@@ -62,7 +59,8 @@ class DadosBancoAPIView(APIView):
                 'year',
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
-                type=openapi.TYPE_INTEGER,
+                type=openapi.TYPE_STRING,
+                enum=get_available_years_months(),  
                 required=True
             ),
             openapi.Parameter(
@@ -78,6 +76,14 @@ class DadosBancoAPIView(APIView):
                 description="Dia para filtrar os dados",
                 type=openapi.TYPE_INTEGER,
                 required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                type=openapi.TYPE_STRING,
+                enum=['Primeiro', 'Segundo'],
+                required=False
             )
         ]
     )
@@ -86,11 +92,12 @@ class DadosBancoAPIView(APIView):
         year = request.query_params.get('year')
         month = request.query_params.get('month')
         day = request.query_params.get('day')
+        semester = request.query_params.get('semester')
 
         if not column_choice:
             return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if column_choice not in [
+        if column_choice != 'all' and column_choice not in [
             'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
             'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
             'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
@@ -110,105 +117,206 @@ class DadosBancoAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            if year and month and day:
-                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
-                query_params = [f"{year}-{month:02}-{day:02}"]
-            elif year and month:
-                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
-                query_params = [f"{year}-{month:02}"]
-            elif year:
-                query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                query_params = [f"{year}"]
+            if column_choice == 'all':
+                query = f"SELECT * FROM {table_name}"
             else:
-                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+                if year and semester:
+                    if semester == 'Primeiro':
+                        query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                    elif semester == 'Segundo':
+                        query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                    else:
+                        return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
+                    query_params = [year]
+                elif year and month and day:
+                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                    query_params = [f"{year}-{month:02}-{day:02}"]
+                elif year and month:
+                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                    query_params = [f"{year}-{month:02}"]
+                elif year:
+                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                    query_params = [f"{year}"]
+                else:
+                    return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
 
             data = cursor.execute(query, query_params).fetchall()
             conn.close()
 
-            df = pd.DataFrame(data, columns=[column_choice])
+            if column_choice == 'all':
+                columns = [description[0] for description in cursor.description]
+            else:
+                columns = [column_choice]
+
+            df = pd.DataFrame(data, columns=columns)
 
             return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
 
-        except Exception as e:
+        except Exception as e:   
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+
 class MapeamentoFeaturesAPIView(APIView):
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years = [row[0] for row in result]
+
+            return available_years
+
+        except Exception as e:
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
+            return []
+
     @swagger_auto_schema(
         manual_parameters=[
-            openapi.Parameter(
-                'table_choice',
-                openapi.IN_QUERY,
-                description="Escolha a tabela",
-                type=openapi.TYPE_STRING,
-                enum=[choice.name for choice in TableChoice]
-            ),
             openapi.Parameter(
                 'action',
                 openapi.IN_QUERY,
                 description="Ação a ser executada",
                 type=openapi.TYPE_STRING,
-                enum=['Mapear Feature', 'Baixar Todas as Features Mapeadas', 'Mapear Feature por Feature']
+                enum=['Mapear Feature', 'Baixar Todas as Features Mapeadas', 'Mapear Feature por Feature'],
+                required=True
             ),
             openapi.Parameter(
                 'feature',
                 openapi.IN_QUERY,
                 description="Feature a ser mapeada",
                 type=openapi.TYPE_STRING,
-                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time']
+                enum=[
+                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                    'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn',
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+                ],
+                required=False
             ),
             openapi.Parameter(
                 'feature_to_count',
                 openapi.IN_QUERY,
                 description="Feature a ser contada com base na primeira feature",
                 type=openapi.TYPE_STRING,
-                enum=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time']
+                enum=[
+                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                    'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn',
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+                ],
+                required=False
+            ),
+            openapi.Parameter(
+                'year',
+                openapi.IN_QUERY,
+                description="Ano para filtrar os dados",
+                type=openapi.TYPE_STRING,
+                enum=get_available_years_months(),
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Mês para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Dia para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                type=openapi.TYPE_STRING,
+                enum=['Primeiro', 'Segundo'],
+                required=False
             )
         ]
     )
-    def post(self, request):
-        table_choice = request.query_params.get('table_choice')
+    def get(self, request):
         action = request.query_params.get('action')
         feature = request.query_params.get('feature')
         feature_to_count = request.query_params.get('feature_to_count')
+        year = request.query_params.get('year')
+        month = request.query_params.get('month')
+        day = request.query_params.get('day')
+        semester = request.query_params.get('semester')
 
-        if not table_choice or not action:
-            return Response({'error': 'Parâmetros table_choice e action são obrigatórios'}, status=400)
+        if not action:
+            return Response({'error': 'Parâmetro action é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            table_choice_enum = TableChoice[table_choice]
+            table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
                 raise KeyError
-            selected_database = table_name
-        except KeyError:
-            return Response({'error': 'Opção de tabela inválida'}, status=400)
 
-        if action == 'Mapear Feature' and feature:
-            return self.map_feature(db_path, table_name, feature)
-        elif action == 'Baixar Todas as Features Mapeadas':
-            return self.download_all_mapped_features(db_path, table_name)
-        elif action == 'Mapear Feature por Feature' and feature and feature_to_count:
-            return self.map_feature_by_feature(db_path, table_name, feature, feature_to_count)
-
-        return Response({'error': 'Ação inválida ou parâmetros ausentes'}, status=400)
-
-    def map_feature(self, db_path, table_name, feature):
-        try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            data = cursor.execute(f"SELECT {feature} FROM {table_name}").fetchall()
+
+            if action == 'Mapear Feature':
+                if not feature:
+                    return Response({'error': 'Parâmetro feature é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
+                return self.map_feature(cursor, table_name, feature)
+
+            elif action == 'Baixar Todas as Features Mapeadas':
+                return self.download_all_mapped_features(cursor, table_name)
+
+            elif action == 'Mapear Feature por Feature':
+                if not feature or not feature_to_count:
+                    return Response({'error': 'Parâmetros feature e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
+                return self.map_feature_by_feature(cursor, table_name, feature, feature_to_count)
+
+            conn.close()
+
+        except KeyError:
+            return Response({'error': 'Opção de tabela inválida'}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def map_feature(self, cursor, table_name, feature):
+        try:
+            query = f"SELECT {feature} FROM {table_name}"
+            data = cursor.execute(query).fetchall()
             values = [row[0] for row in data]
             return Response({'feature_values': values})
         except Exception as e:
-            return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=500)
+            return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def download_all_mapped_features(self, db_path, table_name):
+    def download_all_mapped_features(self, cursor, table_name):
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            data = cursor.execute(f"SELECT * FROM {table_name}").fetchall()
-            df = pd.DataFrame(data, columns=['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code', 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users', 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry', 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score', 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn', 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'])
+            query = f"SELECT * FROM {table_name}"
+            data = cursor.execute(query).fetchall()
+            df = pd.DataFrame(data, columns=[
+                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+            ])
             mapeamento = {}
             for coluna in df.columns:
                 contagem_valores = df[coluna].value_counts().reset_index()
@@ -217,22 +325,20 @@ class MapeamentoFeaturesAPIView(APIView):
                 mapeamento[coluna] = {'contagem_valores': contagem_valores, 'sheet_name': sheet_name}
             return Response({'mapeamento_features': mapeamento})
         except Exception as e:
-            return Response({'error': f'Erro ao baixar todas as features mapeadas: {str(e)}'}, status=500)
+            return Response({'error': f'Erro ao baixar todas as features mapeadas: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def map_feature_by_feature(self, db_path, table_name, feature, feature_to_count):
+    def map_feature_by_feature(self, cursor, table_name, feature, feature_to_count):
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            data = cursor.execute(f"SELECT {feature}, {feature_to_count} FROM {table_name}").fetchall()
+            query = f"SELECT {feature}, {feature_to_count} FROM {table_name}"
+            data = cursor.execute(query).fetchall()
             df = pd.DataFrame(data, columns=[feature, feature_to_count])
             feature_count = df.groupby(feature)[feature_to_count].apply(list).reset_index()
             feature_count.columns = [feature, f'Valores de {feature_to_count}']
             return Response({'feature_count': feature_count.to_dict(orient='records')})
         except Exception as e:
-            return Response({'error': f'Erro ao relacionar os valores das features: {str(e)}'}, status=500)
-
+            return Response({'error': f'Erro ao relacionar os valores das features: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
 class ClusterizacaoAPIView(APIView):
-    pagination_class = PageNumberPagination
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -587,11 +693,34 @@ class CountryScoreAverageView(APIView):
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
-                'table_choice',
+                'year',
                 openapi.IN_QUERY,
-                description="Escolha o banco de dados",
+                description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=[choice.name for choice in TableChoice]
+                enum=DadosBancoAPIView.get_available_years_months(),
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Mês para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Dia para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                type=openapi.TYPE_STRING,
+                enum=['Primeiro', 'Segundo'],
+                required=False
             ),
             openapi.Parameter(
                 'country',
@@ -610,31 +739,45 @@ class CountryScoreAverageView(APIView):
         ],
         responses={200: openapi.Response('Dados gerados com sucesso', schema=openapi.Schema(type=openapi.TYPE_OBJECT))}
     )
-    def post(self, request, *args, **kwargs):
-        table_choice = request.query_params.get('table_choice')
+    def get(self, request, *args, **kwargs):
+        year = request.query_params.get('year')
+        month = request.query_params.get('month')
+        day = request.query_params.get('day')
+        semester = request.query_params.get('semester')
         country = request.query_params.get('country')
         metric = request.query_params.get('metric')
 
-        if not table_choice:
-            return Response({'error': 'O parâmetro table_choice é obrigatório'}, status=400)
-
-        if not metric:
-            return Response({'error': 'O parâmetro metric é obrigatório'}, status=400)
-
         try:
-            table_choice_enum = TableChoice[table_choice]
+            table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
                 raise KeyError
-        except KeyError:
-            return Response({'error': 'Opção de tabela inválida'}, status=400)
 
-        try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {table_name}")
-            data = cursor.fetchall()
+
+            if year and semester:
+                if semester == 'Primeiro':
+                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Segundo':
+                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                else:
+                    return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
+                query_params = [year]
+            elif year and month and day:
+                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                query_params = [f"{year}-{month:02}-{day:02}"]
+            elif year and month:
+                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                query_params = [f"{year}-{month:02}"]
+            elif year:
+                query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                query_params = [f"{year}"]
+            else:
+                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = cursor.execute(query, query_params).fetchall()
             conn.close()
 
             columns = [
@@ -643,7 +786,7 @@ class CountryScoreAverageView(APIView):
                 'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
                 'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
                 'IBM_average history Score', 'IBM_most common score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat'
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
             ]
             df = pd.DataFrame(data, columns=columns)
 
@@ -660,11 +803,11 @@ class CountryScoreAverageView(APIView):
                     else:
                         country_code = self.country_codes.get(country)
                         if country_code is None:
-                            return Response({'error': f'País "{country}" não encontrado'}, status=400)
+                            return Response({'error': f'País "{country}" não encontrado'}, status=status.HTTP_400_BAD_REQUEST)
                         
                         filtered_df = df[df['abuseipdb_country_code'] == country_code]
                         if filtered_df.empty:
-                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=404)
+                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=status.HTTP_404_NOT_FOUND)
                         
                         country_avg_scores = filtered_df['score_average_Mobat'].mean()
                         response_data[country] = country_avg_scores
@@ -684,22 +827,26 @@ class CountryScoreAverageView(APIView):
                     else:
                         country_code = self.country_codes.get(country)
                         if country_code is None:
-                            return Response({'error': f'País "{country}" não encontrado'}, status=400)
+                            return Response({'error': f'País "{country}" não encontrado'}, status=status.HTTP_400_BAD_REQUEST)
                         
                         filtered_df = df[df['abuseipdb_country_code'] == country_code]
                         if filtered_df.empty:
-                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=404)
+                            return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=status.HTTP_404_NOT_FOUND)
                         
                         ip_count = filtered_df.shape[0]
                         response_data[country] = ip_count
 
-            else:
-                return Response({'error': 'Métrica inválida. Use "average" ou "count"'}, status=400)
+                else:
+                    total_ip_count = df.shape[0]
+                    response_data['Total'] = total_ip_count
 
-            return Response(response_data)
+            else:
+                return Response({'error': 'Métrica inválida. Escolha entre "average" ou "count"'}, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(response_data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response({'error': str(e)}, status=500)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # def get(self, request, *args, **kwargs):
     #     return Response({'error': 'Método não suportado'}, status=405)
