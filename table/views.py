@@ -7,10 +7,14 @@ from rest_framework.response import Response
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .filters import TableChoice
-from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif, mutual_info_regression
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif, mutual_info_regression, f_regression
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor
-from sklearn.linear_model import Lasso, ElasticNet
+from sklearn.linear_model import Lasso, ElasticNet, LinearRegression
 from xgboost import XGBRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+
 import numpy as np
 
 class DadosBancoAPIView(APIView):
@@ -191,7 +195,7 @@ class MapeamentoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ação a ser executada",
                 type=openapi.TYPE_STRING,
-                enum=['Mapear Feature', 'Baixar Todas as Features Mapeadas', 'Mapear Feature por Feature'],
+                enum=['Mapear Feature', 'Todas as Features Mapeadas', 'Mapear Feature por Feature'],
                 required=True
             ),
             openapi.Parameter(
@@ -278,46 +282,41 @@ class MapeamentoFeaturesAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query = ""
-            query_params = []
+            query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
+            query_params = [year]
+
+            if month:
+                query += f" AND strftime('%m', Time) = ?"
+                query_params.append(month.zfill(2))  
+
+            if day:
+                query += f" AND strftime('%d', Time) = ?"
+                query_params.append(day.zfill(2))  
+
+            if semester:
+                if semester == 'Primeiro':
+                    query += f" AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Segundo':
+                    query += f" AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                else:
+                    return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = cursor.execute(query, query_params).fetchall()
 
             if action == 'Mapear Feature':
                 if not feature:
                     return Response({'error': 'Parâmetro feature é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature(cursor, table_name, feature)
+                return self.map_feature(data, feature)
 
-            elif action == 'Baixar Todas as Features Mapeadas':
-                return self.download_all_mapped_features(cursor, table_name)
+            elif action == 'Todas as Features Mapeadas':
+                return self.all_mapped_features(data)
 
             elif action == 'Mapear Feature por Feature':
                 if not feature or not feature_to_count:
                     return Response({'error': 'Parâmetros feature e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature_by_feature(cursor, table_name, feature, feature_to_count)
+                return self.map_feature_by_feature(data, feature, feature_to_count)
 
             else:
-                if year:
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                    query_params = [year]
-
-                    if month:
-                        query += f" AND strftime('%m', Time) = ?"
-                        query_params.append(month.zfill(2))  
-
-                    if day:
-                        query += f" AND strftime('%d', Time) = ?"
-                        query_params.append(day.zfill(2))  
-
-                    if semester:
-                        if semester == 'Primeiro':
-                            query += f" AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                        elif semester == 'Segundo':
-                            query += f" AND strftime('%m', Time) BETWEEN '07' AND '12'"
-                        else:
-                            return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
-
-                data = cursor.execute(query, query_params).fetchall()
-                conn.close()
-
                 df = pd.DataFrame(data, columns=[
                     'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
                     'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
@@ -335,19 +334,23 @@ class MapeamentoFeaturesAPIView(APIView):
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-    def map_feature(self, cursor, table_name, feature):
+    def map_feature(self, data, feature):
         try:
-            query = f"SELECT {feature} FROM {table_name}"
-            data = cursor.execute(query).fetchall()
-            values = [row[0] for row in data]
+            df = pd.DataFrame(data, columns=[
+                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+            ])
+            values = df[feature].tolist()
             return Response({'feature_values': values})
         except Exception as e:
             return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def download_all_mapped_features(self, cursor, table_name):
+    def all_mapped_features(self, data):
         try:
-            query = f"SELECT * FROM {table_name}"
-            data = cursor.execute(query).fetchall()
             df = pd.DataFrame(data, columns=[
                 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
                 'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
@@ -370,12 +373,17 @@ class MapeamentoFeaturesAPIView(APIView):
             return Response({'mapeamento': mapeamento})
         except Exception as e:
             return Response({'error': f'Erro ao baixar todos os recursos mapeados: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    def map_feature_by_feature(self, cursor, table_name, feature, feature_to_count):
+        
+    def map_feature_by_feature(self, data, feature, feature_to_count):
         try:
-            query = f"SELECT {feature}, {feature_to_count} FROM {table_name}"
-            data = cursor.execute(query).fetchall()
-            df = pd.DataFrame(data, columns=[feature, feature_to_count])
+            df = pd.DataFrame(data, columns=[
+                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+            ])
             mapeamento_feature_por_feature = {}
             for coluna in df[feature].unique():
                 contagem_valores = df[df[feature] == coluna][feature_to_count].value_counts().reset_index()
@@ -1201,13 +1209,17 @@ class TopIPsScoreAverageAPIView(APIView):
                 query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
                 query_params = [f"{year}-{month:02}"]
             elif year:
-                if semester == 'Primeiro':
-                    query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
-                    query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                if semester:
+                    if semester == 'Primeiro':
+                        query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                    elif semester == 'Segundo':
+                        query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                    else:
+                        return Response({'error': ('Invalid semester chosen')}, status=status.HTTP_400_BAD_REQUEST)
+                    query_params = [f"{year}"]
                 else:
-                    return Response({'error': ('Invalid semester chosen')}, status=status.HTTP_400_BAD_REQUEST)
-                query_params = [f"{year}"]
+                    query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                    query_params = [f"{year}"]
             else:
                 return Response({'error': ('At least the year parameter must be provided')}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1223,3 +1235,208 @@ class TopIPsScoreAverageAPIView(APIView):
 
         except Exception as e:
             return Response({'error': ('Error retrieving data from database: ') + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class DataProcessingAPIView(APIView):
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError("Database path not found")
+                
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years = [row[0] for row in result]
+
+            return available_years
+
+        except Exception as e:
+            print(f'Error retrieving available years: {str(e)}')
+            return []
+
+    @staticmethod
+    def categorize_non_numeric_columns(df):
+        non_numeric_columns = df.select_dtypes(exclude=['number']).columns
+        for column in non_numeric_columns:
+            df[column] = pd.Categorical(df[column]).codes
+        return df
+
+    def plot_show_results_table(self, df, columns):
+        try:
+            print(f"Columns in df: {df.columns}")  
+            print(f"Expected columns: {columns}")
+            df = self.categorize_non_numeric_columns(df)
+            X = df[columns]
+            y = df['score_average_Mobat']
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            vt = VarianceThreshold()
+            X_train_vt = vt.fit_transform(X_train)
+            X_test_vt = vt.transform(X_test)
+            
+            skb = SelectKBest(score_func=f_regression, k=5)
+            X_train_skb = skb.fit_transform(X_train, y_train)
+            X_test_skb = skb.transform(X_test)
+            
+            mrmr_5 = SelectKBest(score_func=mutual_info_regression, k=5)
+            X_train_mrmr_5 = mrmr_5.fit_transform(X_train, y_train)
+            X_test_mrmr_5 = mrmr_5.transform(X_test)
+            
+            mrmr_7 = SelectKBest(score_func=mutual_info_regression, k=7)
+            X_train_mrmr_7 = mrmr_7.fit_transform(X_train, y_train)
+            X_test_mrmr_7 = mrmr_7.transform(X_test)
+            
+            lasso = Lasso()
+            lasso.fit(X_train, y_train)  
+            selected_features_lasso = X.columns[lasso.coef_ != 0]
+            X_train_lasso = X_train[selected_features_lasso]
+            X_test_lasso = X_test[selected_features_lasso]
+            
+            lr = LinearRegression()
+            lr.fit(X_train, y_train)  
+            selected_features_lr = X.columns[lr.coef_ != 0]
+            X_train_lr = X_train[selected_features_lr]
+            X_test_lr = X_test[selected_features_lr]
+            
+            models = [
+                ('GradientBoostingRegressor', GradientBoostingRegressor()),
+                ('RandomForestRegressor', RandomForestRegressor()),
+                ('ExtraTreesRegressor', ExtraTreesRegressor()),
+                ('KNeighborsRegressor', KNeighborsRegressor()),
+            ]
+            
+            results = []
+            
+            for name, model in models:
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                mse = mean_squared_error(y_test, y_pred)
+                results.append({'Model': name, 'Selection Technique': 'None', 'MSE': mse})
+            
+            for name, model in models:
+                for X_train_sel, X_test_sel, sel_name in [
+                    (X_train_vt, X_test_vt, 'VarianceThreshold'),
+                    (X_train_skb, X_test_skb, 'SelectKBest'),
+                    (X_train_mrmr_5, X_test_mrmr_5, 'MRMR-5'),
+                    (X_train_mrmr_7, X_test_mrmr_7, 'MRMR-7'),
+                    (X_train_lasso, X_test_lasso, 'Lasso'),
+                    (X_train_lr, X_test_lr, 'LinearRegression')
+                ]:
+                    model.fit(X_train_sel, y_train)
+                    y_pred = model.predict(X_test_sel)
+                    mse = mean_squared_error(y_test, y_pred)
+                    results.append({'Model': name, 'Selection Technique': sel_name, 'MSE': mse})
+            
+            results_df = pd.DataFrame(results)
+            return results_df.to_dict(orient='records')
+        
+        except Exception as e:
+            print(f'Error processing data: {str(e)}')
+            return {'error': 'Error processing data'}
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                'year',
+                openapi.IN_QUERY,
+                description="Year to filter data",
+                type=openapi.TYPE_STRING,
+                enum=get_available_years_months(),
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Month to filter data",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Day to filter data",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semester to filter data ('Primeiro' or 'Segundo')",
+                type=openapi.TYPE_STRING,
+                enum=['Primeiro', 'Segundo'],
+                required=False
+            )
+        ]
+    )
+    def get(self, request):
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError("Database path not found")
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            year = request.query_params.get('year')
+            month = request.query_params.get('month')
+            day = request.query_params.get('day')
+            semester = request.query_params.get('semester')
+
+            query = ""
+            query_params = []
+
+            if year and month and day:
+                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                query_params = [f"{year}-{month:02}-{day:02}"]
+            elif year and month:
+                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                query_params = [f"{year}-{month:02}"]
+            elif year:
+                if semester:
+                    if semester == 'Primeiro':
+                        query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                    elif semester == 'Segundo':
+                        query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                    else:
+                        return Response({'error': ('Invalid semester chosen')}, status=status.HTTP_400_BAD_REQUEST)
+                    query_params = [f"{year}"]
+                else:
+                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                    query_params = [f"{year}"]
+            else:
+                return Response({'error': ('At least the year parameter must be provided')}, status=status.HTTP_400_BAD_REQUEST)
+
+            result = cursor.execute(query, query_params).fetchall()
+
+            if not result:
+                return Response({'error': ('No data found for the given parameters')}, status=status.HTTP_404_NOT_FOUND)
+
+            conn.close()
+
+            columns = ['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+            ]  
+
+            df = pd.DataFrame(result, columns=columns)
+
+            results = self.plot_show_results_table(df, columns)
+
+            return Response(results, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f'Error in API view: {str(e)}')
+            return Response({'error': 'Internal Server Error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

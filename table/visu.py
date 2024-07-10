@@ -1,38 +1,31 @@
 import sqlite3
-import csv
 
-def csv_to_sqlite(csv_file, db_file, table_name):
-    conn = None
-
+def visualizar_dados_sqlite(db_file):
     try:
+        # Conectar ao banco de dados SQLite
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
 
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            headers = next(reader)
-            columns = ','.join(f'"{header}"' for header in headers)  # Envolve os nomes de colunas com aspas duplas
-            placeholders = ','.join(['?'] * len(headers))
-            create_table_query = f"CREATE TABLE IF NOT EXISTS {table_name} ({columns});"
-            cursor.execute(create_table_query)
+        # Exemplo de consulta: selecionar todos os dados da tabela 'TOTAL'
+        cursor.execute("SELECT * FROM TOTAL")
 
-            insert_query = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders});"
-            for row in reader:
-                cursor.execute(insert_query, row)
+        # Obter os nomes das colunas
+        col_names = [description[0] for description in cursor.description]
 
-        conn.commit()
-        print(f"Arquivo CSV '{csv_file}' convertido para SQLite '{db_file}' na tabela '{table_name}' com sucesso.")
+        # Recuperar todos os dados
+        rows = cursor.fetchall()
+
+        # Exibir os dados retornados
+        for row in rows:
+            print(row)
+
+        print("Colunas presentes na tabela 'TOTAL':", col_names)
+
+        # Fechar a conexão com o banco de dados
+        conn.close()
 
     except sqlite3.Error as e:
-        print(f"Erro ao conectar ao banco de dados SQLite: {e}")
+        print(f"Erro ao acessar o banco de dados SQLite: {e}")
 
-    finally:
-        if conn:
-            conn.close()
-
-# Exemplo de uso:
-csv_file = '/home/yago/Downloads/Total.csv'   # Substitua pelo caminho do seu arquivo CSV
-db_file = '/home/yago/mobat_tool/mobat_tool/Seasons/Total.sqlite'       # Substitua pelo caminho onde deseja salvar o arquivo SQLite
-table_name = 'Total'                # Nome da tabela que será criada no SQLite
-
-csv_to_sqlite(csv_file, db_file, table_name)
+# Substitua '/home/yago/mobat_tool/mobat_tool/Seasons/Total.sqlite' pelo caminho do seu arquivo SQLite
+visualizar_dados_sqlite('/home/yago/mobat_tool/mobat_tool/Seasons/Total.sqlite')
