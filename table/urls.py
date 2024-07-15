@@ -10,5 +10,6 @@ urlpatterns = [
     path('country-score-average/', views.CountryScoreAverageView.as_view(), name='country-score-average'),
     path('top-ips-score-average/', views.TopIPsScoreAverageAPIView.as_view(), name='top-ips-score-average'),
     path('data-processing/', views.DataProcessingAPIView.as_view(), name='data-processing'),  
+    path('dispersao-features/', views.DispersaoFeaturesAPIView.as_view(), name='dispersao-features'),  
 
 ]

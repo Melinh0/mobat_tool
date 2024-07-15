@@ -28,4 +28,4 @@ def visualizar_dados_sqlite(db_file):
         print(f"Erro ao acessar o banco de dados SQLite: {e}")
 
 # Substitua '/home/yago/mobat_tool/mobat_tool/Seasons/Total.sqlite' pelo caminho do seu arquivo SQLite
-visualizar_dados_sqlite('/home/yago/mobat_tool/mobat_tool/Seasons/Total.sqlite')
+visualizar_dados_sqlite(r'C:\Users\Assistencia\Documents\GitHub\mobat_tool\mobat_tool\Seasons\Total.sqlite')

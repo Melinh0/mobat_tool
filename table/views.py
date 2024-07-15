@@ -14,7 +14,6 @@ from xgboost import XGBRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
-
 import numpy as np
 
 class DadosBancoAPIView(APIView):
@@ -1440,3 +1439,159 @@ class DataProcessingAPIView(APIView):
         except Exception as e:
             print(f'Error in API view: {str(e)}')
             return Response({'error': 'Internal Server Error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class DispersaoFeaturesAPIView(APIView):
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years = [row[0] for row in result]
+
+            return available_years
+
+        except Exception as e:
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
+            return []
+
+    def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype('category').cat.codes
+        return df
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                'feature1',
+                openapi.IN_QUERY,
+                description="Primeira feature para correlação",
+                type=openapi.TYPE_STRING,
+                enum=[
+                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                    'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+                ],
+                required=True
+            ),
+            openapi.Parameter(
+                'feature2',
+                openapi.IN_QUERY,
+                description="Segunda feature para correlação",
+                type=openapi.TYPE_STRING,
+                enum=[
+                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
+                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
+                    'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
+                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
+                ],
+                required=True
+            ),
+            openapi.Parameter(
+                'year',
+                openapi.IN_QUERY,
+                description="Ano para filtrar os dados",
+                type=openapi.TYPE_STRING,
+                enum=get_available_years_months(),  
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Mês para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Dia para filtrar os dados",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                type=openapi.TYPE_STRING,
+                enum=['Primeiro', 'Segundo'],
+                required=False
+            )
+        ]
+    )
+    def get(self, request):
+        feature1 = request.query_params.get('feature1')
+        feature2 = request.query_params.get('feature2')
+        year = request.query_params.get('year')
+        month = request.query_params.get('month')
+        day = request.query_params.get('day')
+        semester = request.query_params.get('semester')
+
+        if not feature1 or not feature2:
+            return Response({'error': 'Parâmetros feature1 e feature2 são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = ""
+            query_params = []
+
+            if year and semester:
+                if semester == 'Primeiro':
+                    query = f"SELECT {feature1}, {feature2} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Segundo':
+                    query = f"SELECT {feature1}, {feature2} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                else:
+                    return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
+                query_params = [year]
+            elif year and month and day:
+                query = f"SELECT {feature1}, {feature2} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                query_params = [f"{year}-{month:02}-{day:02}"]
+            elif year and month:
+                query = f"SELECT {feature1}, {feature2} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                query_params = [f"{year}-{month:02}"]
+            elif year:
+                query = f"SELECT {feature1}, {feature2} FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                query_params = [f"{year}"]
+            else:
+                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = cursor.execute(query, query_params).fetchall()
+            conn.close()
+
+            df = pd.DataFrame(data, columns=[feature1, feature2])
+            df = self.categorize_non_numeric_columns(df)
+
+            correlation_matrix = df.corr()
+            correlation = correlation_matrix.loc[feature1, feature2]
+
+            correlation_normalized = ((correlation + 1) / 2) * 100
+
+            return Response({'correlation': correlation_normalized}, status=status.HTTP_200_OK)
+
+        except Exception as e:   
+            return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
