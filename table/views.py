@@ -1,4 +1,5 @@
 import sqlite3
+from django.db.utils import OperationalError
 import pandas as pd
 from sklearn.cluster import KMeans
 from rest_framework.views import APIView
@@ -422,6 +423,32 @@ class ClusterizacaoAPIView(APIView):
             print(f'Erro ao obter anos disponíveis: {str(e)}')
             return []
     
+    @staticmethod
+    def get_available_columns():
+        try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"PRAGMA table_info({table_name})"
+            cursor.execute(query)
+            result = cursor.fetchall()
+
+            conn.close()
+
+            available_columns = [row[1] for row in result]
+
+            return available_columns
+
+        except OperationalError as e:
+            print(f'Erro ao obter colunas disponíveis: {str(e)}')
+            return []
+
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -429,20 +456,8 @@ class ClusterizacaoAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Feature para clusterização",
                 type=openapi.TYPE_STRING,
-                enum=[
-                    'abuseipdb_confidence_score',
-                    'abuseipdb_total_reports',
-                    'abuseipdb_num_distinct_users',
-                    'virustotal_reputation',
-                    'harmless',
-                    'malicious',
-                    'suspicious',
-                    'undetected',
-                    'IBM_score',
-                    'IBM_average_history_Score',
-                    'IBM_most_common_score',
-                    'score_average_Mobat'
-                ]
+                enum=get_available_columns(),
+                required=True
             ),
             openapi.Parameter(
                 'clusters',
@@ -543,6 +558,8 @@ class ClusterizacaoAPIView(APIView):
                 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
             ])
 
+            df = self.categorize_non_numeric_columns(df)
+
             df[feature] = pd.to_numeric(df[feature], errors='coerce')
             df.dropna(subset=[feature], inplace=True)
 
@@ -569,6 +586,12 @@ class ClusterizacaoAPIView(APIView):
                 'data': cluster_data_merged.to_dict(orient='records')
             })
         return cluster_data
+
+    def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype('category').cat.codes
+        return df
     
 class FeatureSelectionAPIView(APIView):
     @staticmethod
