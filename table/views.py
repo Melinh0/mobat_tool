@@ -16,12 +16,18 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 import numpy as np
+from io import StringIO
+from django.http import FileResponse
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class DadosBancoAPIView(APIView):
     @staticmethod
     def get_available_years_months():
         try:
-            table_choice_enum = TableChoice.TOTAL 
+            table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
@@ -40,7 +46,7 @@ class DadosBancoAPIView(APIView):
             return available_years
 
         except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
+            logger.error(f'Erro ao obter anos disponíveis: {str(e)}')
             return []
 
     @swagger_auto_schema(
@@ -64,7 +70,7 @@ class DadosBancoAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),  
+                enum=get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -88,6 +94,14 @@ class DadosBancoAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
+            ),
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description="Quantidade de dados a serem retornados",
+                type=openapi.TYPE_INTEGER,
+                required=False,
+                default=None
             )
         ]
     )
@@ -97,6 +111,9 @@ class DadosBancoAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        limit = request.query_params.get('limit')
+
+        logger.debug(f"Received parameters: column_choice={column_choice}, year={year}, month={month}, day={day}, semester={semester}, limit={limit}")
 
         if not column_choice:
             return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -112,7 +129,7 @@ class DadosBancoAPIView(APIView):
             return Response({'error': 'Coluna escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            table_choice_enum = TableChoice.TOTAL 
+            table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
@@ -147,8 +164,12 @@ class DadosBancoAPIView(APIView):
                 else:
                     return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
 
+            if limit is not None:
+                query += f" LIMIT {limit}"
+
+            logger.debug(f"Executing query: {query} with params: {query_params}")
             data = cursor.execute(query, query_params).fetchall()
-            conn.close()
+            logger.debug(f"Query returned {len(data)} rows")
 
             if column_choice == 'all':
                 columns = [description[0] for description in cursor.description]
@@ -157,11 +178,19 @@ class DadosBancoAPIView(APIView):
 
             df = pd.DataFrame(data, columns=columns)
 
-            return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
+            df.to_csv('filtered_data.csv', index=False)
 
-        except Exception as e:   
+            response_data = {
+                'dados': df.to_dict(orient='records'),
+                'total_count': len(data)
+            }
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f'Erro ao obter dados do banco: {str(e)}')
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
 class MapeamentoFeaturesAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -441,8 +470,7 @@ class ClusterizacaoAPIView(APIView):
 
             conn.close()
 
-            available_columns = [row[1] for row in result]
-
+            available_columns = [row[1] for row in result if row[1] != 'IP']  
             return available_columns
 
         except OperationalError as e:
@@ -590,7 +618,8 @@ class ClusterizacaoAPIView(APIView):
     def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         for col in df.select_dtypes(include=['object']).columns:
-            df[col] = df[col].astype('category').cat.codes
+            if col != 'IP':
+                df[col] = df[col].astype('category').cat.codes
         return df
     
 class FeatureSelectionAPIView(APIView):
@@ -1618,3 +1647,4 @@ class DispersaoFeaturesAPIView(APIView):
 
         except Exception as e:   
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
