@@ -17,11 +17,6 @@ from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 import numpy as np
 from io import StringIO
-from django.http import FileResponse
-import logging
-
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 class DadosBancoAPIView(APIView):
     @staticmethod
@@ -46,7 +41,7 @@ class DadosBancoAPIView(APIView):
             return available_years
 
         except Exception as e:
-            logger.error(f'Erro ao obter anos disponíveis: {str(e)}')
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
             return []
 
     @swagger_auto_schema(
@@ -102,6 +97,15 @@ class DadosBancoAPIView(APIView):
                 type=openapi.TYPE_INTEGER,
                 required=False,
                 default=None
+            ),
+            openapi.Parameter(
+                'format',
+                openapi.IN_QUERY,
+                description="Formato da resposta ('json' ou 'csv')",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                default='json',
+                required=False
             )
         ]
     )
@@ -112,23 +116,26 @@ class DadosBancoAPIView(APIView):
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
         limit = request.query_params.get('limit')
-
-        logger.debug(f"Received parameters: column_choice={column_choice}, year={year}, month={month}, day={day}, semester={semester}, limit={limit}")
+        response_format = request.query_params.get('format', 'json')
 
         if not column_choice:
             return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if column_choice != 'all' and column_choice not in [
+        # Verifica se a coluna é válida
+        valid_columns = [
             'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
             'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
             'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
             'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
             'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
             'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-        ]:
+        ]
+
+        if column_choice != 'all' and column_choice not in valid_columns:
             return Response({'error': 'Coluna escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # Conexão com o banco
             table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
@@ -138,59 +145,61 @@ class DadosBancoAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query = ""
-            query_params = []
+            # Construção da query
+            query, query_params = self.build_query(column_choice, year, month, day, semester)
 
-            if column_choice == 'all':
-                query = f"SELECT * FROM {table_name}"
-            else:
-                if year and semester:
-                    if semester == 'Primeiro':
-                        query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                    elif semester == 'Segundo':
-                        query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
-                    else:
-                        return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
-                    query_params = [year]
-                elif year and month and day:
-                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
-                    query_params = [f"{year}-{month:02}-{day:02}"]
-                elif year and month:
-                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
-                    query_params = [f"{year}-{month:02}"]
-                elif year:
-                    query = f"SELECT {column_choice} FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                    query_params = [f"{year}"]
-                else:
-                    return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+            if not query:
+                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
 
             if limit is not None:
                 query += f" LIMIT {limit}"
 
-            logger.debug(f"Executing query: {query} with params: {query_params}")
-            data = cursor.execute(query, query_params).fetchall()
-            logger.debug(f"Query returned {len(data)} rows")
-
-            if column_choice == 'all':
-                columns = [description[0] for description in cursor.description]
-            else:
-                columns = [column_choice]
+            data = cursor.execute(query, query_params or []).fetchall()
+            columns = [description[0] for description in cursor.description]
+            conn.close()
 
             df = pd.DataFrame(data, columns=columns)
 
-            df.to_csv('filtered_data.csv', index=False)
+            if response_format == 'csv':
+                # Retorna CSV como HttpResponse
+                csv_buffer = StringIO()
+                df.to_csv(csv_buffer, index=False)
+                response = Response(csv_buffer.getvalue(), content_type='text/csv')
+                response['Content-Disposition'] = 'attachment; filename="dados.csv"'
+                return response
 
-            response_data = {
-                'dados': df.to_dict(orient='records'),
-                'total_count': len(data)
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
+            return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f'Erro ao obter dados do banco: {str(e)}')
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+
+    def build_query(self, column_choice, year, month, day, semester):
+        query = ""
+        query_params = []
+
+        if column_choice == 'all':
+            query = f"SELECT * FROM TOTAL"
+        else:
+            if year and semester:
+                if semester == 'Primeiro':
+                    query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Segundo':
+                    query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                else:
+                    return None, None
+                query_params = [year]
+            elif year and month and day:
+                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y-%m-%d', Time) = ?"
+                query_params = [f"{year}-{int(month):02}-{int(day):02}"]
+            elif year and month:
+                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y-%m', Time) = ?"
+                query_params = [f"{year}-{int(month):02}"]
+            elif year:
+                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ?"
+                query_params = [year]
+
+        return query, query_params
+    
 class MapeamentoFeaturesAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -228,12 +237,12 @@ class MapeamentoFeaturesAPIView(APIView):
                 required=True
             ),
             openapi.Parameter(
-                'feature',
+                'feature_choice',
                 openapi.IN_QUERY,
-                description="Feature a ser mapeada",
+                description="Feature a ser mapeada ou 'all' para todas as features",
                 type=openapi.TYPE_STRING,
                 enum=[
-                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
+                    'all', 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
                     'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
                     'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
                     'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
@@ -262,7 +271,7 @@ class MapeamentoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),  
+                enum=get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -291,7 +300,7 @@ class MapeamentoFeaturesAPIView(APIView):
     )
     def get(self, request):
         action = request.query_params.get('action')
-        feature = request.query_params.get('feature')
+        feature_choice = request.query_params.get('feature_choice')
         feature_to_count = request.query_params.get('feature_to_count')
         year = request.query_params.get('year')
         month = request.query_params.get('month')
@@ -316,11 +325,11 @@ class MapeamentoFeaturesAPIView(APIView):
 
             if month:
                 query += f" AND strftime('%m', Time) = ?"
-                query_params.append(month.zfill(2))  
+                query_params.append(month.zfill(2))
 
             if day:
                 query += f" AND strftime('%d', Time) = ?"
-                query_params.append(day.zfill(2))  
+                query_params.append(day.zfill(2))
 
             if semester:
                 if semester == 'Primeiro':
@@ -333,17 +342,17 @@ class MapeamentoFeaturesAPIView(APIView):
             data = cursor.execute(query, query_params).fetchall()
 
             if action == 'Mapear Feature':
-                if not feature:
-                    return Response({'error': 'Parâmetro feature é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature(data, feature)
+                if not feature_choice:
+                    return Response({'error': 'Parâmetro feature_choice é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
+                return self.map_feature(data, feature_choice)
 
             elif action == 'Todas as Features Mapeadas':
                 return self.all_mapped_features(data)
 
             elif action == 'Mapear Feature por Feature':
-                if not feature or not feature_to_count:
-                    return Response({'error': 'Parâmetros feature e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature_by_feature(data, feature, feature_to_count)
+                if not feature_choice or not feature_to_count:
+                    return Response({'error': 'Parâmetros feature_choice e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
+                return self.map_feature_by_feature(data, feature_choice, feature_to_count)
 
             else:
                 df = pd.DataFrame(data, columns=[
@@ -362,8 +371,8 @@ class MapeamentoFeaturesAPIView(APIView):
 
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-    def map_feature(self, data, feature):
+
+    def map_feature(self, data, feature_choice):
         try:
             df = pd.DataFrame(data, columns=[
                 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -373,11 +382,23 @@ class MapeamentoFeaturesAPIView(APIView):
                 'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
                 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
             ])
-            values = df[feature].tolist()
-            return Response({'feature_values': values})
-        except Exception as e:
-            return Response({'error': f'Erro ao recuperar os valores da feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            if feature_choice == 'all':
+                feature_counts = {}
+                for feature in df.columns:
+                    feature_counts[feature] = df[feature].value_counts().to_dict()
+                return Response({'feature_values': feature_counts})
 
+            elif feature_choice in df.columns:
+                feature_values = df[feature_choice].value_counts().to_dict()
+                return Response({'feature_values': feature_values})
+            
+            else:
+                return Response({'error': 'Feature escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            return Response({'error': f'Erro ao mapear feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     def all_mapped_features(self, data):
         try:
             df = pd.DataFrame(data, columns=[
@@ -388,22 +409,11 @@ class MapeamentoFeaturesAPIView(APIView):
                 'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
                 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
             ])
-            mapeamento = {}
-            for coluna in df.columns:
-                contagem_valores = df[coluna].value_counts().reset_index()
-                contagem_valores.columns = [coluna, 'Quantidade']
-                num_valores_unicos = df[coluna].nunique()
-                sheet_name = coluna[:31]
-                mapeamento[coluna] = {
-                    'contagem_valores': contagem_valores.to_dict(orient='records'), 
-                    'num_valores_unicos': num_valores_unicos,
-                    'sheet_name': sheet_name
-                }
-            return Response({'mapeamento': mapeamento})
+            return Response({'mapped_features': df.to_dict(orient='records')})
         except Exception as e:
-            return Response({'error': f'Erro ao baixar todos os recursos mapeados: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-    def map_feature_by_feature(self, data, feature, feature_to_count):
+            return Response({'error': f'Erro ao obter todas as features mapeadas: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def map_feature_by_feature(self, data, feature_choice, feature_to_count):
         try:
             df = pd.DataFrame(data, columns=[
                 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -413,16 +423,12 @@ class MapeamentoFeaturesAPIView(APIView):
                 'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
                 'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
             ])
-            mapeamento_feature_por_feature = {}
-            for coluna in df[feature].unique():
-                contagem_valores = df[df[feature] == coluna][feature_to_count].value_counts().reset_index()
-                contagem_valores.columns = [feature_to_count, 'Quantidade']
-                num_valores_unicos = df[df[feature] == coluna][feature_to_count].nunique()
-                mapeamento_feature_por_feature[coluna] = {
-                    'contagem_valores': contagem_valores.to_dict(orient='records'),
-                    'num_valores_unicos': num_valores_unicos
-                }
-            return Response({'mapeamento_feature_por_feature': mapeamento_feature_por_feature})
+            if feature_choice in df.columns and feature_to_count in df.columns:
+                feature_values = df[feature_choice].value_counts().to_dict()
+                feature_to_count_values = df[feature_to_count].value_counts().to_dict()
+                return Response({'feature_choice_values': feature_values, 'feature_to_count_values': feature_to_count_values})
+            else:
+                return Response({'error': 'Feature escolhida ou feature para contagem inválida'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'error': f'Erro ao mapear feature por feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
@@ -769,10 +775,14 @@ class FeatureSelectionAPIView(APIView):
         return df
 
     def select_features(self, df: pd.DataFrame, technique: str):
+        def handle_infinite_values(series):
+            return series.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
         if technique == 'variance_threshold':
             selector = VarianceThreshold()
             selector.fit(df)
-            variances = np.array(selector.variances_).tolist()
+            variances = np.array(selector.variances_)
+            variances = handle_infinite_values(variances)  
             data = {df.columns[i]: variances[i] for i in range(len(variances))}
 
         elif technique == 'select_kbest':
@@ -780,7 +790,8 @@ class FeatureSelectionAPIView(APIView):
             X = df.drop('score_average_Mobat', axis=1)
             y = df['score_average_Mobat']
             selector.fit(X, y)
-            scores = np.array(selector.scores_).tolist()
+            scores = np.array(selector.scores_)
+            scores = handle_infinite_values(scores) 
             data = {X.columns[i]: scores[i] for i in range(len(scores))}
 
         elif technique == 'lasso':
@@ -788,18 +799,21 @@ class FeatureSelectionAPIView(APIView):
             X = df.drop('score_average_Mobat', axis=1)
             y = df['score_average_Mobat']
             lasso.fit(X, y)
-            coefficients = np.array(lasso.coef_).tolist()
+            coefficients = np.array(lasso.coef_)
+            coefficients = handle_infinite_values(coefficients) 
             data = {X.columns[i]: coefficients[i] for i in range(len(coefficients))}
 
         elif technique == 'mutual_info':
             X = df.drop('score_average_Mobat', axis=1)
             y = df['score_average_Mobat']
-            mutual_info = np.array(mutual_info_regression(X, y)).tolist()
+            mutual_info = np.array(mutual_info_regression(X, y))
+            mutual_info = handle_infinite_values(mutual_info) 
             data = {X.columns[i]: mutual_info[i] for i in range(len(mutual_info))}
 
         elif technique == 'correlation':
             correlation_matrix = df.corr()
             target_correlations = correlation_matrix['score_average_Mobat'].drop('score_average_Mobat')
+            target_correlations = handle_infinite_values(target_correlations)
             data = target_correlations.abs().to_dict()
 
         else:
