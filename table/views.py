@@ -16,7 +16,8 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 import numpy as np
-from io import StringIO
+from io import BytesIO
+from django.http import HttpResponse
 
 class DadosBancoAPIView(APIView):
     @staticmethod
@@ -99,13 +100,12 @@ class DadosBancoAPIView(APIView):
                 default=None
             ),
             openapi.Parameter(
-                'format',
+                'view',
                 openapi.IN_QUERY,
-                description="Formato da resposta ('json' ou 'csv')",
+                description="Escolha o tipo de visualização: 'excel' para baixar o arquivo ou 'swagger' para visualizar os dados diretamente",
                 type=openapi.TYPE_STRING,
-                enum=['json', 'csv'],
-                default='json',
-                required=False
+                enum=['csv', 'json'],
+                default='json'
             )
         ]
     )
@@ -116,12 +116,11 @@ class DadosBancoAPIView(APIView):
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
         limit = request.query_params.get('limit')
-        response_format = request.query_params.get('format', 'json')
+        view = request.query_params.get('view', 'json')
 
         if not column_choice:
             return Response({'error': 'Parâmetro column_choice é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Verifica se a coluna é válida
         valid_columns = [
             'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
             'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
@@ -135,7 +134,6 @@ class DadosBancoAPIView(APIView):
             return Response({'error': 'Coluna escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Conexão com o banco
             table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
@@ -145,34 +143,39 @@ class DadosBancoAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            # Construção da query
             query, query_params = self.build_query(column_choice, year, month, day, semester)
 
             if not query:
                 return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if limit is not None:
-                query += f" LIMIT {limit}"
+            query_params = query_params or []
 
-            data = cursor.execute(query, query_params or []).fetchall()
+            if limit is not None:
+                query += " LIMIT ?"
+                query_params.append(str(int(limit)))
+
+            data = cursor.execute(query, query_params).fetchall()
             columns = [description[0] for description in cursor.description]
             conn.close()
 
-            df = pd.DataFrame(data, columns=columns)
+            if view == 'csv':
+                df = pd.DataFrame(data, columns=columns)
 
-            if response_format == 'csv':
-                # Retorna CSV como HttpResponse
-                csv_buffer = StringIO()
+                csv_buffer = BytesIO()
                 df.to_csv(csv_buffer, index=False)
-                response = Response(csv_buffer.getvalue(), content_type='text/csv')
+                csv_buffer.seek(0)
+
+                response = HttpResponse(csv_buffer.getvalue(), content_type='text/csv')
                 response['Content-Disposition'] = 'attachment; filename="dados.csv"'
                 return response
-
-            return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
+            else:
+                df = pd.DataFrame(data, columns=columns)
+                return Response(df.to_dict(orient='records'))
 
         except Exception as e:
+            print(f'Erro ao obter dados do banco: {str(e)}')
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
     def build_query(self, column_choice, year, month, day, semester):
         query = ""
         query_params = []
@@ -233,7 +236,7 @@ class MapeamentoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ação a ser executada",
                 type=openapi.TYPE_STRING,
-                enum=['Mapear Feature', 'Todas as Features Mapeadas', 'Mapear Feature por Feature'],
+                enum=['Mapear Feature', 'Mapear Feature por Feature'],
                 required=True
             ),
             openapi.Parameter(
@@ -295,6 +298,14 @@ class MapeamentoFeaturesAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
+            ),
+            openapi.Parameter(
+                'view_type',
+                openapi.IN_QUERY,
+                description="Tipo de visualização dos dados ('json' ou 'csv')",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=True
             )
         ]
     )
@@ -306,6 +317,7 @@ class MapeamentoFeaturesAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        view_type = request.query_params.get('view_type')
 
         if not action:
             return Response({'error': 'Parâmetro action é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -340,31 +352,30 @@ class MapeamentoFeaturesAPIView(APIView):
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
 
             data = cursor.execute(query, query_params).fetchall()
+            columns = [description[0] for description in cursor.description]
+            conn.close()
+
+            df = pd.DataFrame(data, columns=columns)
 
             if action == 'Mapear Feature':
                 if not feature_choice:
                     return Response({'error': 'Parâmetro feature_choice é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature(data, feature_choice)
-
-            elif action == 'Todas as Features Mapeadas':
-                return self.all_mapped_features(data)
+                result_df = self.map_feature(df, feature_choice)
 
             elif action == 'Mapear Feature por Feature':
                 if not feature_choice or not feature_to_count:
                     return Response({'error': 'Parâmetros feature_choice e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
-                return self.map_feature_by_feature(data, feature_choice, feature_to_count)
+                result_df = self.map_feature_by_feature(df, feature_choice, feature_to_count)
 
             else:
-                df = pd.DataFrame(data, columns=[
-                    'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                    'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                    'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                    'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                    'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                    'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-                ])
+                result_df = df
 
-                return Response({'dados': df.to_dict(orient='records'), 'total_count': len(data)}, status=status.HTTP_200_OK)
+            if view_type == 'json':
+                return Response(result_df.to_dict(orient='records'))
+            elif view_type == 'csv':
+                return self.export_to_csv(result_df)
+            else:
+                return Response({'error': 'Tipo de visualização inválido'}, status=status.HTTP_400_BAD_REQUEST)
 
         except KeyError:
             return Response({'error': 'Opção de tabela inválida'}, status=status.HTTP_400_BAD_REQUEST)
@@ -372,66 +383,43 @@ class MapeamentoFeaturesAPIView(APIView):
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def map_feature(self, data, feature_choice):
+    def map_feature(self, df, feature_choice):
         try:
-            df = pd.DataFrame(data, columns=[
-                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-            ])
-            
             if feature_choice == 'all':
-                feature_counts = {}
-                for feature in df.columns:
-                    feature_counts[feature] = df[feature].value_counts().to_dict()
-                return Response({'feature_values': feature_counts})
-
+                feature_counts = {feature: df[feature].value_counts().reset_index() for feature in df.columns}
+                for feature, count_df in feature_counts.items():
+                    count_df.columns = [feature, 'count']
+                result_df = pd.concat(feature_counts.values(), ignore_index=True)
             elif feature_choice in df.columns:
-                feature_values = df[feature_choice].value_counts().to_dict()
-                return Response({'feature_values': feature_values})
-            
+                feature_values = df[feature_choice].value_counts().reset_index()
+                feature_values.columns = [feature_choice, 'count']
+                result_df = feature_values
             else:
-                return Response({'error': 'Feature escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
+                raise ValueError('Feature inválida')
+            return result_df
+        except Exception as e:
+            raise ValueError(f'Erro ao mapear feature: {str(e)}')
 
-        except Exception as e:
-            return Response({'error': f'Erro ao mapear feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    def all_mapped_features(self, data):
+    def map_feature_by_feature(self, df, feature_choice, feature_to_count):
         try:
-            df = pd.DataFrame(data, columns=[
-                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-            ])
-            return Response({'mapped_features': df.to_dict(orient='records')})
-        except Exception as e:
-            return Response({'error': f'Erro ao obter todas as features mapeadas: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            if feature_choice not in df.columns or feature_to_count not in df.columns:
+                raise ValueError('Feature escolhida ou feature para contar inválida')
 
-    def map_feature_by_feature(self, data, feature_choice, feature_to_count):
-        try:
-            df = pd.DataFrame(data, columns=[
-                'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-            ])
-            if feature_choice in df.columns and feature_to_count in df.columns:
-                feature_values = df[feature_choice].value_counts().to_dict()
-                feature_to_count_values = df[feature_to_count].value_counts().to_dict()
-                return Response({'feature_choice_values': feature_values, 'feature_to_count_values': feature_to_count_values})
-            else:
-                return Response({'error': 'Feature escolhida ou feature para contagem inválida'}, status=status.HTTP_400_BAD_REQUEST)
+            feature_counts = df.groupby(feature_choice)[feature_to_count].value_counts().unstack(fill_value=0).reset_index()
+            feature_counts.columns.name = None
+            result_df = feature_counts
+            return result_df
         except Exception as e:
-            return Response({'error': f'Erro ao mapear feature por feature: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+            raise ValueError(f'Erro ao mapear feature por feature: {str(e)}')
+
+    def export_to_csv(self, df):
+        csv_buffer = BytesIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+        response = HttpResponse(csv_buffer.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = 'attachment; filename="dados_mapeados.csv"'
+        return response
+
 class ClusterizacaoAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -479,7 +467,7 @@ class ClusterizacaoAPIView(APIView):
             available_columns = [row[1] for row in result if row[1] != 'IP']  
             return available_columns
 
-        except OperationalError as e:
+        except sqlite3.OperationalError as e:
             print(f'Erro ao obter colunas disponíveis: {str(e)}')
             return []
 
@@ -504,7 +492,7 @@ class ClusterizacaoAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=DadosBancoAPIView.get_available_years_months(),
+                enum=get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -528,9 +516,8 @@ class ClusterizacaoAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
-            )
+            ),
         ],
-        responses={200: 'Cluster data generated successfully'},
     )
     def get(self, request):
         feature = request.query_params.get('feature')
@@ -602,7 +589,8 @@ class ClusterizacaoAPIView(APIView):
             df['cluster'] = kmeans.labels_
 
             cluster_data = self.get_cluster_data(df, feature)
-            return Response(cluster_data, status=status.HTTP_200_OK)
+
+            return self.export_to_excel(cluster_data)
 
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -617,7 +605,7 @@ class ClusterizacaoAPIView(APIView):
             cluster_data_merged = pd.merge(cluster_data_counts, mean_feature_by_ip, on='IP', how='left')
             cluster_data.append({
                 'cluster': int(cluster),
-                'data': cluster_data_merged.to_dict(orient='records')
+                'data': cluster_data_merged
             })
         return cluster_data
 
@@ -627,6 +615,17 @@ class ClusterizacaoAPIView(APIView):
             if col != 'IP':
                 df[col] = df[col].astype('category').cat.codes
         return df
+
+    def export_to_excel(self, cluster_data):
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            for cluster in cluster_data:
+                df = pd.DataFrame(cluster['data'])
+                df.to_excel(writer, sheet_name=f'Cluster_{cluster["cluster"]}', index=False)
+        excel_buffer.seek(0)
+        response = HttpResponse(excel_buffer.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        response['Content-Disposition'] = 'attachment; filename="clusters.xlsx"'
+        return response
     
 class FeatureSelectionAPIView(APIView):
     @staticmethod
