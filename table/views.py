@@ -419,7 +419,7 @@ class MapeamentoFeaturesAPIView(APIView):
         response = HttpResponse(csv_buffer.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         response['Content-Disposition'] = 'attachment; filename="dados_mapeados.csv"'
         return response
-
+    
 class ClusterizacaoAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -517,6 +517,14 @@ class ClusterizacaoAPIView(APIView):
                 enum=['Primeiro', 'Segundo'],
                 required=False
             ),
+            openapi.Parameter(
+                'response_format',
+                openapi.IN_QUERY,
+                description="Formato da resposta (excel ou json)",
+                type=openapi.TYPE_STRING,
+                enum=['csv', 'json'],
+                required=True
+            ),
         ],
     )
     def get(self, request):
@@ -526,9 +534,10 @@ class ClusterizacaoAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        response_format = request.query_params.get('response_format')
 
-        if not feature or not clusters or not year:
-            return Response({'error': 'Parâmetros feature, clusters e year são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
+        if not feature or not clusters or not year or not response_format:
+            return Response({'error': 'Parâmetros feature, clusters, year e response_format são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             num_clusters = int(clusters)
@@ -590,7 +599,12 @@ class ClusterizacaoAPIView(APIView):
 
             cluster_data = self.get_cluster_data(df, feature)
 
-            return self.export_to_excel(cluster_data)
+            if response_format == 'csv':
+                return self.export_to_csv(cluster_data)
+            elif response_format == 'json':
+                return Response(cluster_data)
+            else:
+                return Response({'error': 'Formato de resposta inválido. Escolha "excel" ou "json"'}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -616,17 +630,15 @@ class ClusterizacaoAPIView(APIView):
                 df[col] = df[col].astype('category').cat.codes
         return df
 
-    def export_to_excel(self, cluster_data):
-        excel_buffer = BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-            for cluster in cluster_data:
-                df = pd.DataFrame(cluster['data'])
-                df.to_excel(writer, sheet_name=f'Cluster_{cluster["cluster"]}', index=False)
-        excel_buffer.seek(0)
-        response = HttpResponse(excel_buffer.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        response['Content-Disposition'] = 'attachment; filename="clusters.xlsx"'
+    def export_to_csv(self, cluster_data):
+        csv_buffer = BytesIO()
+        all_data = pd.concat([pd.DataFrame(cluster['data']).assign(Cluster=cluster['cluster']) for cluster in cluster_data])
+        all_data.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+        response = HttpResponse(csv_buffer.getvalue(), content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="cluster_data.csv"'
         return response
-    
+
 class FeatureSelectionAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -667,7 +679,7 @@ class FeatureSelectionAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=DadosBancoAPIView.get_available_years_months(),
+                enum=get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -691,7 +703,15 @@ class FeatureSelectionAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
-            )
+            ),
+            openapi.Parameter(
+                'output_format',
+                openapi.IN_QUERY,
+                description="Formato de saída desejado (json ou excel)",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=True
+            ),
         ],
         responses={200: 'Feature selection data generated successfully'},
     )
@@ -701,6 +721,7 @@ class FeatureSelectionAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        output_format = request.query_params.get('output_format', 'json')
 
         if not technique:
             return Response({'error': 'Parâmetro technique é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -762,7 +783,10 @@ class FeatureSelectionAPIView(APIView):
             df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
             selected_data = self.select_features(df_filtered, technique)
 
-            return Response(selected_data, status=status.HTTP_200_OK)
+            if output_format == 'csv':
+                return self.export_to_csv(selected_data)
+            else:
+                return Response(selected_data, status=status.HTTP_200_OK)
 
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -774,8 +798,9 @@ class FeatureSelectionAPIView(APIView):
         return df
 
     def select_features(self, df: pd.DataFrame, technique: str):
-        def handle_infinite_values(series):
-            return series.replace([np.inf, -np.inf], np.nan).fillna(0)
+        def handle_infinite_values(array):
+            array = np.where(np.isinf(array), np.nan, array)
+            return np.nan_to_num(array, nan=0.0)
         
         if technique == 'variance_threshold':
             selector = VarianceThreshold()
@@ -811,16 +836,51 @@ class FeatureSelectionAPIView(APIView):
 
         elif technique == 'correlation':
             correlation_matrix = df.corr()
-            target_correlations = correlation_matrix['score_average_Mobat'].drop('score_average_Mobat')
-            target_correlations = handle_infinite_values(target_correlations)
-            data = target_correlations.abs().to_dict()
+            target_correlations = correlation_matrix['score_average_Mobat']
+            correlations = np.array(target_correlations)
+            correlations = handle_infinite_values(correlations) 
+            data = {target_correlations.index[i]: correlations[i] for i in range(len(correlations))}
 
         else:
-            raise ValueError("Invalid technique")
+            raise ValueError('Técnica de seleção de características inválida')
 
-        return [{'feature': key, 'score': value} for key, value in data.items()]
+        return data
+
+    def export_to_csv(self, data):
+        output = BytesIO()
+        df = pd.DataFrame(list(data.items()), columns=['Feature', 'Score'])
+        df.to_csv(output, index=False, encoding='utf-8', sep=',')
+        output.seek(0)         
+        response = HttpResponse(output.getvalue(), content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename=feature_selection.csv'
+        return response
     
 class FeatureImportanceAPIView(APIView):
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years = [row[0] for row in result]
+
+            return available_years
+
+        except Exception as e:
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
+            return []
+
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -835,7 +895,7 @@ class FeatureImportanceAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=DadosBancoAPIView.get_available_years_months(),  
+                enum=get_available_years_months(),  
                 required=True
             ),
             openapi.Parameter(
@@ -859,6 +919,15 @@ class FeatureImportanceAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
+            ),
+            openapi.Parameter(
+                'format',
+                openapi.IN_QUERY,
+                description="Formato da resposta: 'json' ou 'csv'",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=False,
+                default='csv'
             )
         ],
         responses={200: 'Model selection data generated successfully'},
@@ -869,6 +938,7 @@ class FeatureImportanceAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        response_format = request.query_params.get('format', 'csv')
 
         if not model_type:
             return Response({'error': 'Parâmetro model_type é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -924,7 +994,12 @@ class FeatureImportanceAPIView(APIView):
             df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
             selected_data = self.importance_ml(df_filtered, model_type)
 
-            return Response(selected_data, status=status.HTTP_200_OK)
+            if response_format == 'csv':
+                return self.export_to_csv(selected_data)
+            elif response_format == 'json':
+                return Response(selected_data, status=status.HTTP_200_OK)
+            else:
+                return Response({'error': 'Formato de resposta inválido'}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -936,46 +1011,59 @@ class FeatureImportanceAPIView(APIView):
         return df
 
     def importance_ml(self, df: pd.DataFrame, model_type: str):
+        def handle_infinite_values(array):
+            array = np.where(np.isinf(array), np.nan, array)
+            return np.nan_to_num(array, nan=0.0)
+        
         if model_type == 'GradientBoostingRegressor':
             model = GradientBoostingRegressor()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = model.feature_importances_
+            feature_importances = handle_infinite_values(model.feature_importances_)
             data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
 
         elif model_type == 'RandomForestRegressor':
             model = RandomForestRegressor()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = model.feature_importances_
+            feature_importances = handle_infinite_values(model.feature_importances_)
             data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
 
         elif model_type == 'ExtraTreesRegressor':
             model = ExtraTreesRegressor()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = model.feature_importances_
+            feature_importances = handle_infinite_values(model.feature_importances_)
             data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
 
         elif model_type == 'AdaBoostRegressor':
             model = AdaBoostRegressor()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = model.feature_importances_
+            feature_importances = handle_infinite_values(model.feature_importances_)
             data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
 
         elif model_type == 'XGBRegressor':
             model = XGBRegressor()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = model.feature_importances_
+            feature_importances = handle_infinite_values(model.feature_importances_)
             data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
 
         elif model_type == 'ElasticNet':
             model = ElasticNet()
             model.fit(df.drop('score_average_Mobat', axis=1), df['score_average_Mobat'])
-            feature_importances = np.abs(model.coef_)
-            data = {df.columns[i]: feature_importances[i] for i in range(len(feature_importances))}
+            coefficients = handle_infinite_values(np.abs(model.coef_))
+            data = {df.columns[i]: coefficients[i] for i in range(len(coefficients))}
 
         else:
             raise ValueError("Model type not supported. Please choose a supported model.")
 
-        return [{'feature': key, 'importance': value} for key, value in data.items()]
+        return data
+
+    def export_to_csv(self, data):
+        output = BytesIO()
+        df = pd.DataFrame(list(data.items()), columns=['Feature', 'Importance'])
+        df.to_csv(output, index=False, encoding='utf-8', sep=',')
+        output.seek(0)         
+        response = HttpResponse(output.getvalue(), content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename=feature_importance.csv'
+        return response
     
 class CountryScoreAverageView(APIView):
     country_names = {
