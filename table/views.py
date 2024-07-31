@@ -856,31 +856,6 @@ class FeatureSelectionAPIView(APIView):
         return response
     
 class FeatureImportanceAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
-            return []
-
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -895,7 +870,7 @@ class FeatureImportanceAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),  
+                enum=DadosBancoAPIView.get_available_years_months(),  
                 required=True
             ),
             openapi.Parameter(
@@ -921,13 +896,12 @@ class FeatureImportanceAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'format',
+                'response_type',
                 openapi.IN_QUERY,
-                description="Formato da resposta: 'json' ou 'csv'",
+                description="Tipo de resposta: 'json' ou 'csv'",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
-                required=False,
-                default='csv'
+                required=False
             )
         ],
         responses={200: 'Model selection data generated successfully'},
@@ -938,7 +912,7 @@ class FeatureImportanceAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        response_format = request.query_params.get('format', 'csv')
+        response_type = request.query_params.get('response_type', 'json')
 
         if not model_type:
             return Response({'error': 'Parâmetro model_type é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -994,12 +968,10 @@ class FeatureImportanceAPIView(APIView):
             df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
             selected_data = self.importance_ml(df_filtered, model_type)
 
-            if response_format == 'csv':
+            if response_type == 'csv':
                 return self.export_to_csv(selected_data)
-            elif response_format == 'json':
-                return Response(selected_data, status=status.HTTP_200_OK)
             else:
-                return Response({'error': 'Formato de resposta inválido'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(selected_data)
 
         except Exception as e:
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1057,11 +1029,11 @@ class FeatureImportanceAPIView(APIView):
         return data
 
     def export_to_csv(self, data):
-        output = BytesIO()
         df = pd.DataFrame(list(data.items()), columns=['Feature', 'Importance'])
-        df.to_csv(output, index=False, encoding='utf-8', sep=',')
-        output.seek(0)         
-        response = HttpResponse(output.getvalue(), content_type='text/csv')
+        buffer = BytesIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        response = HttpResponse(buffer, content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename=feature_importance.csv'
         return response
     
@@ -1088,6 +1060,15 @@ class CountryScoreAverageView(APIView):
     def calculate_ip_counts(self, df):
         ip_counts = df['abuseipdb_country_code'].value_counts().sort_index()
         return ip_counts
+
+    def export_to_csv(self, data, filename='data.csv'):
+        df = pd.DataFrame(list(data.items()), columns=['Country', 'Value'])
+        buffer = BytesIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        response = HttpResponse(buffer, content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename={filename}'
+        return response
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -1134,6 +1115,14 @@ class CountryScoreAverageView(APIView):
                 description="Métrica a ser visualizada: 'average' para média do score ou 'count' para contagem de registros de endereços IP",
                 type=openapi.TYPE_STRING,
                 enum=['average', 'count']
+            ),
+            openapi.Parameter(
+                'response_type',
+                openapi.IN_QUERY,
+                description="Tipo de resposta: 'json' ou 'csv'",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=False
             )
         ],
         responses={200: openapi.Response('Dados gerados com sucesso', schema=openapi.Schema(type=openapi.TYPE_OBJECT))}
@@ -1145,6 +1134,7 @@ class CountryScoreAverageView(APIView):
         semester = request.query_params.get('semester')
         country = request.query_params.get('country')
         metric = request.query_params.get('metric')
+        response_type = request.query_params.get('response_type', 'json')
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1219,8 +1209,8 @@ class CountryScoreAverageView(APIView):
                 if country and country != 'None':
                     if country == 'Todos':
                         ip_counts = self.calculate_ip_counts(df)
-                        mean_ip_count = np.mean(list(ip_counts.values))
-                        response_data['Média das quantidades de endereços IP'] = mean_ip_count
+                        total_ip_counts = np.sum(list(ip_counts.values))
+                        response_data['Total de IPs reportados'] = total_ip_counts
                         for country_code, country_name in self.country_names.items():
                             response_data[country_name] = ip_counts.get(country_code, 0)
                     else:
@@ -1232,21 +1222,26 @@ class CountryScoreAverageView(APIView):
                         if filtered_df.empty:
                             return Response({'error': f'Nenhum dado encontrado para o país {country}'}, status=status.HTTP_404_NOT_FOUND)
                         
-                        ip_count = filtered_df.shape[0]
-                        response_data[country] = ip_count
+                        country_ip_count = len(filtered_df)
+                        response_data[country] = country_ip_count
 
                 else:
-                    total_ip_count = df.shape[0]
-                    response_data['Total'] = total_ip_count
+                    global_ip_count = len(df)
+                    response_data['Global'] = global_ip_count
 
             else:
-                return Response({'error': 'Métrica inválida. Escolha entre "average" ou "count"'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'Métrica escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if response_type == 'csv':
+                return self.export_to_csv(response_data, filename=f'{metric}_data.csv')
 
             return Response(response_data, status=status.HTTP_200_OK)
 
+        except KeyError:
+            return Response({'error': 'Parâmetros inválidos'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            return Response({'error': f'Erro ao processar os dados: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
 class TopIPsScoreAverageAPIView(APIView):
     @staticmethod
     def get_available_years_months():
@@ -1292,6 +1287,15 @@ class TopIPsScoreAverageAPIView(APIView):
 
         return ip_variations_sorted
 
+    def export_to_csv(self, data):
+        df = pd.DataFrame(data)
+        buffer = BytesIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        response = HttpResponse(buffer, content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename=top_ips_score_average.csv'
+        return response
+
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -1330,11 +1334,20 @@ class TopIPsScoreAverageAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
+            ),
+            openapi.Parameter(
+                'response_type',
+                openapi.IN_QUERY,
+                description="Response format (json or csv)",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=False
             )
         ]
     )
     def get(self, request):
-        num_ips = int(request.query_params.get('num_ips', 5))  
+        num_ips = int(request.query_params.get('num_ips', 5))
+        response_type = request.query_params.get('response_type', 'json')
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1367,13 +1380,13 @@ class TopIPsScoreAverageAPIView(APIView):
                     elif semester == 'Segundo':
                         query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                     else:
-                        return Response({'error': ('Invalid semester chosen')}, status=status.HTTP_400_BAD_REQUEST)
+                        return Response({'error': 'Invalid semester chosen'}, status=status.HTTP_400_BAD_REQUEST)
                     query_params = [f"{year}"]
                 else:
                     query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ?"
                     query_params = [f"{year}"]
             else:
-                return Response({'error': ('At least the year parameter must be provided')}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'At least the year parameter must be provided'}, status=status.HTTP_400_BAD_REQUEST)
 
             data = cursor.execute(query, query_params).fetchall()
             conn.close()
@@ -1383,10 +1396,13 @@ class TopIPsScoreAverageAPIView(APIView):
 
             top_ips_data = self.plot_top_ips_score_average(df, num_ips)
 
+            if response_type == 'csv':
+                return self.export_to_csv(top_ips_data)
+
             return Response({'top_ips_data': top_ips_data, 'total_count': len(data)}, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response({'error': ('Error retrieving data from database: ') + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'Error retrieving data from database: ' + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class DataProcessingAPIView(APIView):
     @staticmethod
@@ -1396,8 +1412,8 @@ class DataProcessingAPIView(APIView):
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
-                raise KeyError("Database path not found")
-                
+                raise KeyError
+
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
@@ -1414,17 +1430,8 @@ class DataProcessingAPIView(APIView):
             print(f'Error retrieving available years: {str(e)}')
             return []
 
-    @staticmethod
-    def categorize_non_numeric_columns(df):
-        non_numeric_columns = df.select_dtypes(exclude=['number']).columns
-        for column in non_numeric_columns:
-            df[column] = pd.Categorical(df[column]).codes
-        return df
-
     def plot_show_results_table(self, df, columns):
         try:
-            print(f"Columns in df: {df.columns}")  
-            print(f"Expected columns: {columns}")
             df = self.categorize_non_numeric_columns(df)
             X = df[columns]
             y = df['score_average_Mobat']
@@ -1447,13 +1454,13 @@ class DataProcessingAPIView(APIView):
             X_test_mrmr_7 = mrmr_7.transform(X_test)
             
             lasso = Lasso()
-            lasso.fit(X_train, y_train)  
+            lasso.fit(X_train, y_train)
             selected_features_lasso = X.columns[lasso.coef_ != 0]
             X_train_lasso = X_train[selected_features_lasso]
             X_test_lasso = X_test[selected_features_lasso]
             
             lr = LinearRegression()
-            lr.fit(X_train, y_train)  
+            lr.fit(X_train, y_train)
             selected_features_lr = X.columns[lr.coef_ != 0]
             X_train_lr = X_train[selected_features_lr]
             X_test_lr = X_test[selected_features_lr]
@@ -1488,11 +1495,26 @@ class DataProcessingAPIView(APIView):
                     results.append({'Model': name, 'Selection Technique': sel_name, 'MSE': mse})
             
             results_df = pd.DataFrame(results)
-            return results_df.to_dict(orient='records')
+            return results_df
         
         except Exception as e:
             print(f'Error processing data: {str(e)}')
-            return {'error': 'Error processing data'}
+            return pd.DataFrame({'error': ['Error processing data']})
+
+    def categorize_non_numeric_columns(self, df):
+        non_numeric_columns = df.select_dtypes(exclude=['number']).columns
+        for column in non_numeric_columns:
+            df[column] = pd.Categorical(df[column]).codes
+        return df
+
+    def export_to_csv(self, data):
+        df = pd.DataFrame(data)
+        buffer = BytesIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        response = HttpResponse(buffer, content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename=results.csv'
+        return response
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -1525,16 +1547,26 @@ class DataProcessingAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
-            )
+            ),
+            openapi.Parameter(
+                'response_type',
+                openapi.IN_QUERY,
+                description="Response format (json or csv)",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=False
+            ),
         ]
     )
     def get(self, request):
+        response_type = request.query_params.get('response_type', 'json')
+
         try:
             table_choice_enum = TableChoice.TOTAL
             table_name = table_choice_enum.value
             db_path = TableChoice.get_db_path(table_name)
             if not db_path:
-                raise KeyError("Database path not found")
+                raise KeyError
 
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
@@ -1560,38 +1592,29 @@ class DataProcessingAPIView(APIView):
                     elif semester == 'Segundo':
                         query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                     else:
-                        return Response({'error': ('Invalid semester chosen')}, status=status.HTTP_400_BAD_REQUEST)
+                        return Response({'error': 'Invalid semester chosen'}, status=status.HTTP_400_BAD_REQUEST)
                     query_params = [f"{year}"]
                 else:
                     query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
                     query_params = [f"{year}"]
             else:
-                return Response({'error': ('At least the year parameter must be provided')}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'At least the year parameter must be provided'}, status=status.HTTP_400_BAD_REQUEST)
 
-            result = cursor.execute(query, query_params).fetchall()
-
-            if not result:
-                return Response({'error': ('No data found for the given parameters')}, status=status.HTTP_404_NOT_FOUND)
-
+            data = cursor.execute(query, query_params).fetchall()
             conn.close()
 
-            columns = ['IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
-                'abuseipdb_isp', 'abuseipdb_domain', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
-                'abuseipdb_last_reported_at', 'virustotal_reputation', 'virustotal_regional_internet_registry',
-                'virustotal_as_owner', 'harmless', 'malicious', 'suspicious', 'undetected', 'IBM_score',
-                'IBM_average_history_Score', 'IBM_most_common_score', 'virustotal_asn', 'SHODAN_asn',
-                'SHODAN_isp', 'ALIENVAULT_reputation', 'ALIENVAULT_asn', 'score_average_Mobat', 'Time'
-            ]  
+            columns = [column[0] for column in cursor.description]
+            df = pd.DataFrame(data, columns=columns)
 
-            df = pd.DataFrame(result, columns=columns)
+            results_df = self.plot_show_results_table(df, columns)
 
-            results = self.plot_show_results_table(df, columns)
+            if response_type == 'csv':
+                return self.export_to_csv(results_df)
 
-            return Response(results, status=status.HTTP_200_OK)
+            return Response({'results': results_df.to_dict(orient='records')}, status=status.HTTP_200_OK)
 
         except Exception as e:
-            print(f'Error in API view: {str(e)}')
-            return Response({'error': 'Internal Server Error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'Error retrieving data from database: ' + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class DispersaoFeaturesAPIView(APIView):
     @staticmethod
@@ -1624,6 +1647,15 @@ class DispersaoFeaturesAPIView(APIView):
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].astype('category').cat.codes
         return df
+
+    def export_to_csv(self, correlation_data):
+        df = pd.DataFrame(correlation_data, index=[0])
+        buffer = BytesIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        response = HttpResponse(buffer, content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename=dispersao_features_correlation.csv'
+        return response
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -1686,6 +1718,14 @@ class DispersaoFeaturesAPIView(APIView):
                 type=openapi.TYPE_STRING,
                 enum=['Primeiro', 'Segundo'],
                 required=False
+            ),
+            openapi.Parameter(
+                'response_type',
+                openapi.IN_QUERY,
+                description="Formato de resposta (json ou csv)",
+                type=openapi.TYPE_STRING,
+                enum=['json', 'csv'],
+                required=False
             )
         ]
     )
@@ -1696,6 +1736,7 @@ class DispersaoFeaturesAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        response_type = request.query_params.get('response_type', 'json')
 
         if not feature1 or not feature2:
             return Response({'error': 'Parâmetros feature1 e feature2 são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1744,8 +1785,10 @@ class DispersaoFeaturesAPIView(APIView):
 
             correlation_normalized = ((correlation + 1) / 2) * 100
 
+            if response_type == 'csv':
+                return self.export_to_csv({'Correlation': correlation_normalized})
+
             return Response({'correlation': correlation_normalized}, status=status.HTTP_200_OK)
 
         except Exception as e:   
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
