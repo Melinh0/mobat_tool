@@ -1,5 +1,4 @@
 import sqlite3
-from django.db.utils import OperationalError
 import pandas as pd
 from sklearn.cluster import KMeans
 from rest_framework.views import APIView
@@ -45,12 +44,37 @@ class DadosBancoAPIView(APIView):
             print(f'Erro ao obter anos disponíveis: {str(e)}')
             return []
 
+    @staticmethod
+    def get_available_columns():
+        try:
+            table_choice_enum = TableChoice.TOTAL 
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"PRAGMA table_info({table_name})"
+            cursor.execute(query)
+            result = cursor.fetchall()
+
+            conn.close()
+
+            available_columns = [row[1] for row in result if row[1] != 'IP']  
+            return available_columns
+
+        except sqlite3.OperationalError as e:
+            print(f'Erro ao obter colunas disponíveis: {str(e)}')
+            return []
+
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
                 'column_choice',
                 openapi.IN_QUERY,
-                description="Coluna desejada",
+                description="Desired column",
                 type=openapi.TYPE_STRING,
                 enum=[
                     'all', 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -64,7 +88,7 @@ class DadosBancoAPIView(APIView):
             openapi.Parameter(
                 'year',
                 openapi.IN_QUERY,
-                description="Ano para filtrar os dados",
+                description="Year to filter the data",
                 type=openapi.TYPE_STRING,
                 enum=get_available_years_months(),
                 required=True
@@ -72,29 +96,29 @@ class DadosBancoAPIView(APIView):
             openapi.Parameter(
                 'month',
                 openapi.IN_QUERY,
-                description="Mês para filtrar os dados",
+                description="Month to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'day',
                 openapi.IN_QUERY,
-                description="Dia para filtrar os dados",
+                description="Day to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
                 required=False
             ),
             openapi.Parameter(
                 'limit',
                 openapi.IN_QUERY,
-                description="Quantidade de dados a serem retornados",
+                description="Number of data rows to be returned",
                 type=openapi.TYPE_INTEGER,
                 required=False,
                 default=None
@@ -102,7 +126,7 @@ class DadosBancoAPIView(APIView):
             openapi.Parameter(
                 'view',
                 openapi.IN_QUERY,
-                description="Escolha o tipo de visualização: 'excel' para baixar o arquivo ou 'swagger' para visualizar os dados diretamente",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['csv', 'json'],
                 default='json'
@@ -204,45 +228,20 @@ class DadosBancoAPIView(APIView):
         return query, query_params
     
 class MapeamentoFeaturesAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
-            return []
-
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
                 'action',
                 openapi.IN_QUERY,
-                description="Ação a ser executada",
+                description="Action to be performed",
                 type=openapi.TYPE_STRING,
-                enum=['Mapear Feature', 'Mapear Feature por Feature'],
+                enum=['Map Feature', 'Map Feature by Feature'],
                 required=True
             ),
             openapi.Parameter(
                 'feature_choice',
                 openapi.IN_QUERY,
-                description="Feature a ser mapeada ou 'all' para todas as features",
+                description="Feature to be mapped or 'all' for all features",
                 type=openapi.TYPE_STRING,
                 enum=[
                     'all', 'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -257,7 +256,7 @@ class MapeamentoFeaturesAPIView(APIView):
             openapi.Parameter(
                 'feature_to_count',
                 openapi.IN_QUERY,
-                description="Feature a ser contada com base na primeira feature",
+                description="Feature to be counted based on the first feature",
                 type=openapi.TYPE_STRING,
                 enum=[
                     'IP', 'abuseipdb_is_whitelisted', 'abuseipdb_confidence_score', 'abuseipdb_country_code',
@@ -272,37 +271,37 @@ class MapeamentoFeaturesAPIView(APIView):
             openapi.Parameter(
                 'year',
                 openapi.IN_QUERY,
-                description="Ano para filtrar os dados",
+                description="Year to filter the data",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),
+                enum=DadosBancoAPIView.get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
                 'month',
                 openapi.IN_QUERY,
-                description="Mês para filtrar os dados",
+                description="Month to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'day',
                 openapi.IN_QUERY,
-                description="Dia para filtrar os dados",
+                description="Day to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
                 required=False
             ),
             openapi.Parameter(
-                'view_type',
+                'view',
                 openapi.IN_QUERY,
-                description="Tipo de visualização dos dados ('json' ou 'csv')",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
                 required=True
@@ -317,7 +316,7 @@ class MapeamentoFeaturesAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        view_type = request.query_params.get('view_type')
+        view = request.query_params.get('view')
 
         if not action:
             return Response({'error': 'Parâmetro action é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -370,9 +369,9 @@ class MapeamentoFeaturesAPIView(APIView):
             else:
                 result_df = df
 
-            if view_type == 'json':
+            if view == 'json':
                 return Response(result_df.to_dict(orient='records'))
-            elif view_type == 'csv':
+            elif view == 'csv':
                 return self.export_to_csv(result_df)
             else:
                 return Response({'error': 'Tipo de visualização inválido'}, status=status.HTTP_400_BAD_REQUEST)
@@ -421,106 +420,56 @@ class MapeamentoFeaturesAPIView(APIView):
         return response
     
 class ClusterizacaoAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL 
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
-            return []
-    
-    @staticmethod
-    def get_available_columns():
-        try:
-            table_choice_enum = TableChoice.TOTAL 
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"PRAGMA table_info({table_name})"
-            cursor.execute(query)
-            result = cursor.fetchall()
-
-            conn.close()
-
-            available_columns = [row[1] for row in result if row[1] != 'IP']  
-            return available_columns
-
-        except sqlite3.OperationalError as e:
-            print(f'Erro ao obter colunas disponíveis: {str(e)}')
-            return []
-
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
                 'feature',
                 openapi.IN_QUERY,
-                description="Feature para clusterização",
+                description="Feature for clustering",
                 type=openapi.TYPE_STRING,
-                enum=get_available_columns(),
+                enum=DadosBancoAPIView.get_available_columns(),
                 required=True
             ),
             openapi.Parameter(
                 'clusters',
                 openapi.IN_QUERY,
-                description="Número de clusters desejados",
+                description="Number of desired clusters",
                 type=openapi.TYPE_INTEGER
             ),
             openapi.Parameter(
                 'year',
                 openapi.IN_QUERY,
-                description="Ano para filtrar os dados",
+                description="Year to filter the data",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),
+                enum=DadosBancoAPIView.get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
                 'month',
                 openapi.IN_QUERY,
-                description="Mês para filtrar os dados",
+                description="Month to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'day',
                 openapi.IN_QUERY,
-                description="Dia para filtrar os dados",
+                description="Day to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
                 required=False
             ),
             openapi.Parameter(
-                'response_format',
+                'view',
                 openapi.IN_QUERY,
-                description="Formato da resposta (excel ou json)",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['csv', 'json'],
                 required=True
@@ -534,9 +483,9 @@ class ClusterizacaoAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        response_format = request.query_params.get('response_format')
+        view = request.query_params.get('view')
 
-        if not feature or not clusters or not year or not response_format:
+        if not feature or not clusters or not year or not view:
             return Response({'error': 'Parâmetros feature, clusters, year e response_format são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
@@ -599,9 +548,9 @@ class ClusterizacaoAPIView(APIView):
 
             cluster_data = self.get_cluster_data(df, feature)
 
-            if response_format == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(cluster_data)
-            elif response_format == 'json':
+            elif view == 'json':
                 return Response(cluster_data)
             else:
                 return Response({'error': 'Formato de resposta inválido. Escolha "excel" ou "json"'}, status=status.HTTP_400_BAD_REQUEST)
@@ -639,32 +588,7 @@ class ClusterizacaoAPIView(APIView):
         response['Content-Disposition'] = 'attachment; filename="cluster_data.csv"'
         return response
 
-class FeatureSelectionAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL 
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
-            return []
-        
+class FeatureSelectionAPIView(APIView):    
     @swagger_auto_schema(
         manual_parameters=[
             openapi.Parameter(
@@ -679,7 +603,7 @@ class FeatureSelectionAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),
+                enum=DadosBancoAPIView.get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -705,9 +629,9 @@ class FeatureSelectionAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'output_format',
+                'view',
                 openapi.IN_QUERY,
-                description="Formato de saída desejado (json ou excel)",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
                 required=True
@@ -721,7 +645,7 @@ class FeatureSelectionAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        output_format = request.query_params.get('output_format', 'json')
+        view = request.query_params.get('view', 'json')
 
         if not technique:
             return Response({'error': 'Parâmetro technique é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -783,7 +707,7 @@ class FeatureSelectionAPIView(APIView):
             df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
             selected_data = self.select_features(df_filtered, technique)
 
-            if output_format == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(selected_data)
             else:
                 return Response(selected_data, status=status.HTTP_200_OK)
@@ -896,9 +820,9 @@ class FeatureImportanceAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'response_type',
+                'view',
                 openapi.IN_QUERY,
-                description="Tipo de resposta: 'json' ou 'csv'",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
                 required=False
@@ -912,7 +836,7 @@ class FeatureImportanceAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        response_type = request.query_params.get('response_type', 'json')
+        view = request.query_params.get('view', 'json')
 
         if not model_type:
             return Response({'error': 'Parâmetro model_type é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
@@ -968,7 +892,7 @@ class FeatureImportanceAPIView(APIView):
             df_filtered = self.categorize_non_numeric_columns(df[allowed_columns])
             selected_data = self.importance_ml(df_filtered, model_type)
 
-            if response_type == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(selected_data)
             else:
                 return Response(selected_data)
@@ -1117,9 +1041,9 @@ class CountryScoreAverageView(APIView):
                 enum=['average', 'count']
             ),
             openapi.Parameter(
-                'response_type',
+                'view',
                 openapi.IN_QUERY,
-                description="Tipo de resposta: 'json' ou 'csv'",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
                 required=False
@@ -1134,7 +1058,7 @@ class CountryScoreAverageView(APIView):
         semester = request.query_params.get('semester')
         country = request.query_params.get('country')
         metric = request.query_params.get('metric')
-        response_type = request.query_params.get('response_type', 'json')
+        view = request.query_params.get('view', 'json')
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1232,7 +1156,7 @@ class CountryScoreAverageView(APIView):
             else:
                 return Response({'error': 'Métrica escolhida inválida'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if response_type == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(response_data, filename=f'{metric}_data.csv')
 
             return Response(response_data, status=status.HTTP_200_OK)
@@ -1243,31 +1167,6 @@ class CountryScoreAverageView(APIView):
             return Response({'error': f'Erro ao processar os dados: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class TopIPsScoreAverageAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Error retrieving available years: {str(e)}')
-            return []
-
     def plot_top_ips_score_average(self, df, num_ips):
         df['score_average_Mobat'] = pd.to_numeric(df['score_average_Mobat'], errors='coerce')
         df = df.dropna(subset=['score_average_Mobat'])
@@ -1310,7 +1209,7 @@ class TopIPsScoreAverageAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Year to filter data",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),
+                enum=DadosBancoAPIView.get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -1336,7 +1235,7 @@ class TopIPsScoreAverageAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'response_type',
+                'view',
                 openapi.IN_QUERY,
                 description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
@@ -1347,7 +1246,7 @@ class TopIPsScoreAverageAPIView(APIView):
     )
     def get(self, request):
         num_ips = int(request.query_params.get('num_ips', 5))
-        response_type = request.query_params.get('response_type', 'json')
+        view = request.query_params.get('view', 'json')
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1396,7 +1295,7 @@ class TopIPsScoreAverageAPIView(APIView):
 
             top_ips_data = self.plot_top_ips_score_average(df, num_ips)
 
-            if response_type == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(top_ips_data)
 
             return Response({'top_ips_data': top_ips_data, 'total_count': len(data)}, status=status.HTTP_200_OK)
@@ -1405,31 +1304,6 @@ class TopIPsScoreAverageAPIView(APIView):
             return Response({'error': 'Error retrieving data from database: ' + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class DataProcessingAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Error retrieving available years: {str(e)}')
-            return []
-
     def plot_show_results_table(self, df, columns):
         try:
             df = self.categorize_non_numeric_columns(df)
@@ -1523,7 +1397,7 @@ class DataProcessingAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Year to filter data",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),
+                enum=DadosBancoAPIView.get_available_years_months(),
                 required=True
             ),
             openapi.Parameter(
@@ -1549,7 +1423,7 @@ class DataProcessingAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'response_type',
+                'view',
                 openapi.IN_QUERY,
                 description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
@@ -1559,7 +1433,7 @@ class DataProcessingAPIView(APIView):
         ]
     )
     def get(self, request):
-        response_type = request.query_params.get('response_type', 'json')
+        view = request.query_params.get('view', 'json')
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1608,7 +1482,7 @@ class DataProcessingAPIView(APIView):
 
             results_df = self.plot_show_results_table(df, columns)
 
-            if response_type == 'csv':
+            if view == 'csv':
                 return self.export_to_csv(results_df)
 
             return Response({'results': results_df.to_dict(orient='records')}, status=status.HTTP_200_OK)
@@ -1617,31 +1491,6 @@ class DataProcessingAPIView(APIView):
             return Response({'error': 'Error retrieving data from database: ' + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class DispersaoFeaturesAPIView(APIView):
-    @staticmethod
-    def get_available_years_months():
-        try:
-            table_choice_enum = TableChoice.TOTAL 
-            table_name = table_choice_enum.value
-            db_path = TableChoice.get_db_path(table_name)
-            if not db_path:
-                raise KeyError
-
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
-            result = cursor.execute(query).fetchall()
-
-            conn.close()
-
-            available_years = [row[0] for row in result]
-
-            return available_years
-
-        except Exception as e:
-            print(f'Erro ao obter anos disponíveis: {str(e)}')
-            return []
-
     def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         for col in df.select_dtypes(include=['object']).columns:
@@ -1694,7 +1543,7 @@ class DispersaoFeaturesAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Ano para filtrar os dados",
                 type=openapi.TYPE_STRING,
-                enum=get_available_years_months(),  
+                enum=DadosBancoAPIView.get_available_years_months(),  
                 required=True
             ),
             openapi.Parameter(
@@ -1720,9 +1569,9 @@ class DispersaoFeaturesAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
-                'response_type',
+                'view',
                 openapi.IN_QUERY,
-                description="Formato de resposta (json ou csv)",
+                description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
                 required=False
@@ -1736,7 +1585,7 @@ class DispersaoFeaturesAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
-        response_type = request.query_params.get('response_type', 'json')
+        view = request.query_params.get('view', 'json')
 
         if not feature1 or not feature2:
             return Response({'error': 'Parâmetros feature1 e feature2 são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1785,7 +1634,7 @@ class DispersaoFeaturesAPIView(APIView):
 
             correlation_normalized = ((correlation + 1) / 2) * 100
 
-            if response_type == 'csv':
+            if view == 'csv':
                 return self.export_to_csv({'Correlation': correlation_normalized})
 
             return Response({'correlation': correlation_normalized}, status=status.HTTP_200_OK)
