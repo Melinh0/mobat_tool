@@ -27,21 +27,6 @@ class DataEntry(models.Model):
     ALIENVAULT_asn = models.IntegerField()
     score_average_Mobat = models.FloatField()
 
-    class Meta:
-        abstract = True
-
-class PrimeiroSemestre(DataEntry):
-    class Meta:
-        db_table = 'PrimeiroSemestre'
-
-class SegundoSemestre(DataEntry):
-    class Meta:
-        db_table = 'SegundoSemestre'
-
-class TerceiroSemestre(DataEntry):
-    class Meta:
-        db_table = 'TerceiroSemestre'
-
 class Total(DataEntry):
     class Meta:
         db_table = 'Total'
