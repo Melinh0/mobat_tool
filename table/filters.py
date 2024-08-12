@@ -3,6 +3,7 @@ from django.conf import settings
 
 class TableChoice(Enum):
     TOTAL = 'Total'
+    DEFAULT = 'default'
 
     @classmethod
     def choices(cls):
@@ -13,5 +14,6 @@ class TableChoice(Enum):
         databases = settings.DATABASES
         mapping = {
             'Total': databases['Total']['NAME'],
+            'default': databases['default']['NAME'],
         }
         return mapping.get(choice)

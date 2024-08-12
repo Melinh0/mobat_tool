@@ -113,7 +113,7 @@ class DadosBancoAPIView(APIView):
                 description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
                 enum=['First', 'Second'],
-                required=False
+                required=True
             ),
             openapi.Parameter(
                 'limit',
@@ -208,9 +208,9 @@ class DadosBancoAPIView(APIView):
             query = f"SELECT * FROM TOTAL"
         else:
             if year and semester:
-                if semester == 'Primeiro':
+                if semester == 'First':
                     query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
+                elif semester == 'Second':
                     query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return None, None
@@ -296,7 +296,7 @@ class MapeamentoFeaturesAPIView(APIView):
                 description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
                 enum=['First', 'Second'],
-                required=False
+                required=True  
             ),
             openapi.Parameter(
                 'view',
@@ -320,6 +320,9 @@ class MapeamentoFeaturesAPIView(APIView):
 
         if not action:
             return Response({'error': 'Parâmetro action é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not semester:
+            return Response({'error': 'Parâmetro semester é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -343,9 +346,9 @@ class MapeamentoFeaturesAPIView(APIView):
                 query_params.append(day.zfill(2))
 
             if semester:
-                if semester == 'Primeiro':
+                if semester == 'First':
                     query += f" AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
+                elif semester == 'Second':
                     query += f" AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
@@ -356,12 +359,12 @@ class MapeamentoFeaturesAPIView(APIView):
 
             df = pd.DataFrame(data, columns=columns)
 
-            if action == 'Mapear Feature':
+            if action == 'Map Feature':
                 if not feature_choice:
                     return Response({'error': 'Parâmetro feature_choice é obrigatório para a ação Mapear Feature'}, status=status.HTTP_400_BAD_REQUEST)
                 result_df = self.map_feature(df, feature_choice)
 
-            elif action == 'Mapear Feature por Feature':
+            elif action == 'Map Feature by Feature':
                 if not feature_choice or not feature_to_count:
                     return Response({'error': 'Parâmetros feature_choice e feature_to_count são obrigatórios para a ação Mapear Feature por Feature'}, status=status.HTTP_400_BAD_REQUEST)
                 result_df = self.map_feature_by_feature(df, feature_choice, feature_to_count)
