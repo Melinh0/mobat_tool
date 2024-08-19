@@ -113,7 +113,14 @@ class DadosBancoAPIView(APIView):
                 description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
                 enum=['First', 'Second'],
-                required=True
+                required=False
+            ),
+            openapi.Parameter(
+                'ip_address',
+                openapi.IN_QUERY,
+                description="IP address to filter the data",
+                type=openapi.TYPE_STRING,
+                required=False
             ),
             openapi.Parameter(
                 'limit',
@@ -139,6 +146,7 @@ class DadosBancoAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        ip_address = request.query_params.get('ip_address')
         limit = request.query_params.get('limit')
         view = request.query_params.get('view', 'json')
 
@@ -167,7 +175,7 @@ class DadosBancoAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query, query_params = self.build_query(column_choice, year, month, day, semester)
+            query, query_params = self.build_query(column_choice, year, month, day, semester, ip_address)
 
             if not query:
                 return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
@@ -199,31 +207,42 @@ class DadosBancoAPIView(APIView):
         except Exception as e:
             print(f'Erro ao obter dados do banco: {str(e)}')
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-    def build_query(self, column_choice, year, month, day, semester):
+
+    def build_query(self, column_choice, year, month, day, semester, ip_address):
         query = ""
         query_params = []
 
         if column_choice == 'all':
             query = f"SELECT * FROM TOTAL"
         else:
-            if year and semester:
+            query = f"SELECT {column_choice} FROM TOTAL"
+
+        filters = []
+
+        if year:
+            filters.append("strftime('%Y', Time) = ?")
+            query_params.append(year)
+
+            if semester:
                 if semester == 'First':
-                    query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                    filters.append("strftime('%m', Time) BETWEEN '01' AND '06'")
                 elif semester == 'Second':
-                    query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
-                else:
-                    return None, None
-                query_params = [year]
-            elif year and month and day:
-                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y-%m-%d', Time) = ?"
-                query_params = [f"{year}-{int(month):02}-{int(day):02}"]
-            elif year and month:
-                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y-%m', Time) = ?"
-                query_params = [f"{year}-{int(month):02}"]
-            elif year:
-                query = f"SELECT {column_choice} FROM TOTAL WHERE strftime('%Y', Time) = ?"
-                query_params = [year]
+                    filters.append("strftime('%m', Time) BETWEEN '07' AND '12'")
+
+            if month:
+                filters.append("strftime('%m', Time) = ?")
+                query_params.append(f"{int(month):02}")
+
+            if day:
+                filters.append("strftime('%d', Time) = ?")
+                query_params.append(f"{int(day):02}")
+
+        if ip_address:
+            filters.append("IP = ?")
+            query_params.append(ip_address)
+
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
 
         return query, query_params
     
@@ -299,12 +318,19 @@ class MapeamentoFeaturesAPIView(APIView):
                 required=True  
             ),
             openapi.Parameter(
+                'specific_ip',
+                openapi.IN_QUERY,
+                description="Specific IP to filter the data",
+                type=openapi.TYPE_STRING,
+                required=False
+            ),
+            openapi.Parameter(
                 'view',
                 openapi.IN_QUERY,
                 description="Response format (json or csv)",
                 type=openapi.TYPE_STRING,
                 enum=['json', 'csv'],
-                required=True
+                default='json'
             )
         ]
     )
@@ -316,6 +342,7 @@ class MapeamentoFeaturesAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        specific_ip = request.query_params.get('specific_ip')
         view = request.query_params.get('view')
 
         if not action:
@@ -352,6 +379,10 @@ class MapeamentoFeaturesAPIView(APIView):
                     query += f" AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if specific_ip:
+                query += " AND IP = ?"
+                query_params.append(specific_ip)
 
             data = cursor.execute(query, query_params).fetchall()
             columns = [description[0] for description in cursor.description]
@@ -398,6 +429,9 @@ class MapeamentoFeaturesAPIView(APIView):
                 result_df = feature_values
             else:
                 raise ValueError('Feature inválida')
+            
+            result_df = result_df.fillna(0)
+
             return result_df
         except Exception as e:
             raise ValueError(f'Erro ao mapear feature: {str(e)}')
@@ -410,11 +444,14 @@ class MapeamentoFeaturesAPIView(APIView):
             feature_counts = df.groupby(feature_choice)[feature_to_count].value_counts().unstack(fill_value=0).reset_index()
             feature_counts.columns.name = None
             result_df = feature_counts
+            result_df = result_df.fillna(0)
+
             return result_df
         except Exception as e:
             raise ValueError(f'Erro ao mapear feature por feature: {str(e)}')
 
     def export_to_csv(self, df):
+        df = df.fillna(0)  
         csv_buffer = BytesIO()
         df.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -470,6 +507,13 @@ class ClusterizacaoAPIView(APIView):
                 required=False
             ),
             openapi.Parameter(
+                'ip_address',
+                openapi.IN_QUERY,
+                description="Specific IP address to filter the data",
+                type=openapi.TYPE_STRING,
+                required=False
+            ),
+            openapi.Parameter(
                 'view',
                 openapi.IN_QUERY,
                 description="Response format (json or csv)",
@@ -486,10 +530,11 @@ class ClusterizacaoAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        ip_address = request.query_params.get('ip_address')
         view = request.query_params.get('view')
 
         if not feature or not clusters or not year or not view:
-            return Response({'error': 'Parâmetros feature, clusters, year e response_format são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Parâmetros feature, clusters, year e view são obrigatórios'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             num_clusters = int(clusters)
@@ -509,9 +554,9 @@ class ClusterizacaoAPIView(APIView):
             query_params = []
 
             if year and semester:
-                if semester == 'Primeiro':
+                if semester == 'First':
                     query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
+                elif semester == 'Second':
                     query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
@@ -527,6 +572,10 @@ class ClusterizacaoAPIView(APIView):
                 query_params = [f"{year}"]
             else:
                 return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if ip_address:
+                query += " AND IP = ?"
+                query_params.append(ip_address)
 
             data = cursor.execute(query, query_params).fetchall()
             conn.close()
@@ -549,6 +598,9 @@ class ClusterizacaoAPIView(APIView):
             kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init=10).fit(X)
             df['cluster'] = kmeans.labels_
 
+            if ip_address:
+                df = df[df['IP'] == ip_address]
+
             cluster_data = self.get_cluster_data(df, feature)
 
             if view == 'csv':
@@ -556,7 +608,7 @@ class ClusterizacaoAPIView(APIView):
             elif view == 'json':
                 return Response(cluster_data)
             else:
-                return Response({'error': 'Formato de resposta inválido. Escolha "excel" ou "json"'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': 'Formato de resposta inválido. Escolha "csv" ou "json"'}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
