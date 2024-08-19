@@ -645,61 +645,69 @@ class ClusterizacaoAPIView(APIView):
 
 class FeatureSelectionAPIView(APIView):    
     @swagger_auto_schema(
-        manual_parameters=[
-            openapi.Parameter(
-                'technique',
-                openapi.IN_QUERY,
-                description="Seleção de característica para visualizar os dados",
-                type=openapi.TYPE_STRING,
-                enum=['variance_threshold', 'select_kbest', 'lasso', 'mutual_info', 'correlation']
-            ),
-            openapi.Parameter(
-                'year',
-                openapi.IN_QUERY,
-                description="Ano para filtrar os dados",
-                type=openapi.TYPE_STRING,
-                enum=DadosBancoAPIView.get_available_years_months(),
-                required=True
-            ),
-            openapi.Parameter(
-                'month',
-                openapi.IN_QUERY,
-                description="Mês para filtrar os dados",
-                type=openapi.TYPE_INTEGER,
-                required=False
-            ),
-            openapi.Parameter(
-                'day',
-                openapi.IN_QUERY,
-                description="Dia para filtrar os dados",
-                type=openapi.TYPE_INTEGER,
-                required=False
-            ),
-            openapi.Parameter(
-                'semester',
-                openapi.IN_QUERY,
-                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
-                type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
-                required=False
-            ),
-            openapi.Parameter(
-                'view',
-                openapi.IN_QUERY,
-                description="Response format (json or csv)",
-                type=openapi.TYPE_STRING,
-                enum=['json', 'csv'],
-                required=True
-            ),
-        ],
-        responses={200: 'Feature selection data generated successfully'},
-    )
+    manual_parameters=[
+        openapi.Parameter(
+            'technique',
+            openapi.IN_QUERY,
+            description="Feature selection technique to visualize the data",
+            type=openapi.TYPE_STRING,
+            enum=['variance_threshold', 'select_kbest', 'lasso', 'mutual_info', 'correlation']
+        ),
+        openapi.Parameter(
+            'year',
+            openapi.IN_QUERY,
+            description="Year to filter the data",
+            type=openapi.TYPE_STRING,
+            enum=DadosBancoAPIView.get_available_years_months(),
+            required=True
+        ),
+        openapi.Parameter(
+            'month',
+            openapi.IN_QUERY,
+            description="Month to filter the data",
+            type=openapi.TYPE_INTEGER,
+            required=False
+        ),
+        openapi.Parameter(
+            'day',
+            openapi.IN_QUERY,
+            description="Day to filter the data",
+            type=openapi.TYPE_INTEGER,
+            required=False
+        ),
+        openapi.Parameter(
+            'semester',
+            openapi.IN_QUERY,
+            description="Semester to filter the data ('First' or 'Second')",
+            type=openapi.TYPE_STRING,
+            enum=['First', 'Second'],
+            required=False
+        ),
+        openapi.Parameter(
+            'ip',
+            openapi.IN_QUERY,
+            description="Specific IP address to filter the data",
+            type=openapi.TYPE_STRING,
+            required=False
+        ),
+        openapi.Parameter(
+            'view',
+            openapi.IN_QUERY,
+            description="Response format (json or csv)",
+            type=openapi.TYPE_STRING,
+            enum=['json', 'csv'],
+            required=True
+        ),
+    ],
+    responses={200: 'Feature selection data generated successfully'},
+)
     def get(self, request):
         technique = request.query_params.get('technique')
         year = request.query_params.get('year')
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        ip = request.query_params.get('ip')
         view = request.query_params.get('view', 'json')
 
         if not technique:
@@ -718,28 +726,32 @@ class FeatureSelectionAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query = ""
+            query = f"SELECT * FROM {table_name} WHERE 1=1"
             query_params = []
 
             if year and semester:
-                if semester == 'Primeiro':
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                if semester == 'First':
+                    query += " AND strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Second':
+                    query += " AND strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
-                query_params = [year]
+                query_params.append(year)
             elif year and month and day:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
-                query_params = [f"{year}-{month:02}-{day:02}"]
+                query += " AND strftime('%Y-%m-%d', Time) = ?"
+                query_params.append(f"{year}-{month:02}-{day:02}")
             elif year and month:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
-                query_params = [f"{year}-{month:02}"]
+                query += " AND strftime('%Y-%m', Time) = ?"
+                query_params.append(f"{year}-{month:02}")
             elif year:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                query_params = [year]
+                query += " AND strftime('%Y', Time) = ?"
+                query_params.append(year)
             else:
                 return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if ip:
+                query += " AND IP = ?"
+                query_params.append(ip)
 
             data = cursor.execute(query, query_params).fetchall()
             columns = [
@@ -840,14 +852,14 @@ class FeatureImportanceAPIView(APIView):
             openapi.Parameter(
                 'model_type',
                 openapi.IN_QUERY,
-                description="Modelos para visualizar os dados de importância",
+                description="Models to visualize feature importance data",
                 type=openapi.TYPE_STRING,
                 enum=['GradientBoostingRegressor', 'RandomForestRegressor', 'ExtraTreesRegressor', 'AdaBoostRegressor', 'XGBRegressor', 'ElasticNet']
             ),
             openapi.Parameter(
                 'year',
                 openapi.IN_QUERY,
-                description="Ano para filtrar os dados",
+                description="Year to filter the data",
                 type=openapi.TYPE_STRING,
                 enum=DadosBancoAPIView.get_available_years_months(),  
                 required=True
@@ -855,23 +867,30 @@ class FeatureImportanceAPIView(APIView):
             openapi.Parameter(
                 'month',
                 openapi.IN_QUERY,
-                description="Mês para filtrar os dados",
+                description="Month to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'day',
                 openapi.IN_QUERY,
-                description="Dia para filtrar os dados",
+                description="Day to filter the data",
                 type=openapi.TYPE_INTEGER,
                 required=False
             ),
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
+                description="Semester to filter the data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
+                required=False
+            ),
+            openapi.Parameter(
+                'ip',
+                openapi.IN_QUERY,
+                description="Specific IP address to filter the data",
+                type=openapi.TYPE_STRING,
                 required=False
             ),
             openapi.Parameter(
@@ -891,10 +910,11 @@ class FeatureImportanceAPIView(APIView):
         month = request.query_params.get('month')
         day = request.query_params.get('day')
         semester = request.query_params.get('semester')
+        ip_address = request.query_params.get('ip')
         view = request.query_params.get('view', 'json')
 
         if not model_type:
-            return Response({'error': 'Parâmetro model_type é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'The parameter model_type is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         if model_type not in ['GradientBoostingRegressor', 'RandomForestRegressor', 'ExtraTreesRegressor', 'AdaBoostRegressor', 'XGBRegressor', 'ElasticNet']:
             return Response({'error': 'Model type not supported'}, status=status.HTTP_400_BAD_REQUEST)
@@ -909,28 +929,32 @@ class FeatureImportanceAPIView(APIView):
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
 
-            query = ""
+            query = f"SELECT * FROM {table_name} WHERE 1=1"
             query_params = []
 
-            if year and semester:
-                if semester == 'Primeiro':
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+            if year:
+                query += " AND strftime('%Y', Time) = ?"
+                query_params.append(year)
+
+            if semester:
+                if semester == 'First':
+                    query += " AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                elif semester == 'Second':
+                    query += " AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
-                    return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
-                query_params = [year]
-            elif year and month and day:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
-                query_params = [f"{year}-{month:02}-{day:02}"]
-            elif year and month:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
-                query_params = [f"{year}-{month:02}"]
-            elif year:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                query_params = [year]
-            else:
-                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({'error': 'Invalid semester selected'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if month:
+                query += " AND strftime('%m', Time) = ?"
+                query_params.append(f"{month:02}")
+
+            if day:
+                query += " AND strftime('%d', Time) = ?"
+                query_params.append(f"{day:02}")
+
+            if ip_address:
+                query += " AND IP = ?"
+                query_params.append(ip_address)
 
             data = cursor.execute(query, query_params).fetchall()
             columns = [description[0] for description in cursor.description]
@@ -953,7 +977,7 @@ class FeatureImportanceAPIView(APIView):
                 return Response(selected_data)
 
         except Exception as e:
-            return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': f'Error retrieving data from the database: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def categorize_non_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -1078,7 +1102,7 @@ class CountryScoreAverageView(APIView):
                 openapi.IN_QUERY,
                 description="Semestre para filtrar os dados ('Primeiro' ou 'Segundo')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
                 required=False
             ),
             openapi.Parameter(
@@ -1126,9 +1150,9 @@ class CountryScoreAverageView(APIView):
             cursor = conn.cursor()
 
             if year and semester:
-                if semester == 'Primeiro':
+                if semester == 'First':
                     query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                elif semester == 'Segundo':
+                elif semester == 'Second':
                     query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                 else:
                     return Response({'error': 'Semestre escolhido inválido'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1366,6 +1390,7 @@ class DataProcessingAPIView(APIView):
             y = df['score_average_Mobat']
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
             
+            # Feature selection methods
             vt = VarianceThreshold()
             X_train_vt = vt.fit_transform(X_train)
             X_test_vt = vt.transform(X_test)
@@ -1472,9 +1497,16 @@ class DataProcessingAPIView(APIView):
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semester to filter data ('Primeiro' or 'Segundo')",
+                description="Semester to filter data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
+                required=False
+            ),
+            openapi.Parameter(
+                'ip_address',
+                openapi.IN_QUERY,
+                description="Specific IP address to view related data",
+                type=openapi.TYPE_STRING,
                 required=False
             ),
             openapi.Parameter(
@@ -1504,30 +1536,39 @@ class DataProcessingAPIView(APIView):
             month = request.query_params.get('month')
             day = request.query_params.get('day')
             semester = request.query_params.get('semester')
+            ip_address = request.query_params.get('ip_address')
 
-            query = ""
+            query = f"SELECT * FROM {table_name}"
             query_params = []
+            conditions = []
 
             if year and month and day:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
-                query_params = [f"{year}-{month:02}-{day:02}"]
+                conditions.append("strftime('%Y-%m-%d', Time) = ?")
+                query_params.append(f"{year}-{month:02}-{day:02}")
             elif year and month:
-                query = f"SELECT * FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
-                query_params = [f"{year}-{month:02}"]
+                conditions.append("strftime('%Y-%m', Time) = ?")
+                query_params.append(f"{year}-{month:02}")
             elif year:
                 if semester:
-                    if semester == 'Primeiro':
-                        query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                    elif semester == 'Segundo':
-                        query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                    if semester == 'First':
+                        conditions.append("strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'")
+                    elif semester == 'Second':
+                        conditions.append("strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'")
                     else:
                         return Response({'error': 'Invalid semester chosen'}, status=status.HTTP_400_BAD_REQUEST)
-                    query_params = [f"{year}"]
+                    query_params.append(f"{year}")
                 else:
-                    query = f"SELECT * FROM {table_name} WHERE strftime('%Y', Time) = ?"
-                    query_params = [f"{year}"]
+                    conditions.append("strftime('%Y', Time) = ?")
+                    query_params.append(f"{year}")
             else:
                 return Response({'error': 'At least the year parameter must be provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if ip_address:
+                conditions.append("IP = ?")
+                query_params.append(ip_address)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
 
             data = cursor.execute(query, query_params).fetchall()
             conn.close()
