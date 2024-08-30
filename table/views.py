@@ -617,9 +617,10 @@ class ClusterizacaoAPIView(APIView):
         cluster_data = []
         for cluster in df['cluster'].unique():
             cluster_df = df[df['cluster'] == cluster]
-            cluster_data_counts = cluster_df['IP'].value_counts().reset_index().rename(columns={'index': 'IP', 'IP': 'Quantidade'})
+            cluster_data_counts = cluster_df['IP'].value_counts().reset_index().rename(columns={'index': 'IP', 'IP': 'Quantidade'})            
             mean_feature_by_ip = cluster_df.groupby('IP')[selected_feature].mean().reset_index()
             mean_feature_by_ip.rename(columns={selected_feature: f'Mean_{selected_feature}'}, inplace=True)
+            mean_feature_by_ip[f'Mean_{selected_feature}'] = mean_feature_by_ip[f'Mean_{selected_feature}'].round(1)
             cluster_data_merged = pd.merge(cluster_data_counts, mean_feature_by_ip, on='IP', how='left')
             cluster_data.append({
                 'cluster': int(cluster),
@@ -793,43 +794,48 @@ class FeatureSelectionAPIView(APIView):
             array = np.where(np.isinf(array), np.nan, array)
             return np.nan_to_num(array, nan=0.0)
         
+        if 'score_average_Mobat' not in df.columns:
+            raise ValueError('A coluna "score_average_Mobat" não está presente nos dados')
+
+        X = df.drop('score_average_Mobat', axis=1, errors='ignore')
+        y = df['score_average_Mobat']
+
+        X = X.loc[:, X.apply(pd.Series.nunique) != 1]
+
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+        y = y.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
         if technique == 'variance_threshold':
             selector = VarianceThreshold()
-            selector.fit(df)
+            selector.fit(X)
             variances = np.array(selector.variances_)
-            variances = handle_infinite_values(variances)  
-            data = {df.columns[i]: variances[i] for i in range(len(variances))}
+            variances = handle_infinite_values(variances)
+            data = {X.columns[i]: variances[i] for i in range(len(variances))}
 
         elif technique == 'select_kbest':
-            selector = SelectKBest(score_func=f_classif, k=5)
-            X = df.drop('score_average_Mobat', axis=1)
-            y = df['score_average_Mobat']
+            selector = SelectKBest(score_func=f_classif, k=min(5, X.shape[1]))
             selector.fit(X, y)
             scores = np.array(selector.scores_)
-            scores = handle_infinite_values(scores) 
+            scores = handle_infinite_values(scores)
             data = {X.columns[i]: scores[i] for i in range(len(scores))}
 
         elif technique == 'lasso':
             lasso = Lasso(alpha=0.1)
-            X = df.drop('score_average_Mobat', axis=1)
-            y = df['score_average_Mobat']
             lasso.fit(X, y)
             coefficients = np.array(lasso.coef_)
-            coefficients = handle_infinite_values(coefficients) 
+            coefficients = handle_infinite_values(coefficients)
             data = {X.columns[i]: coefficients[i] for i in range(len(coefficients))}
 
         elif technique == 'mutual_info':
-            X = df.drop('score_average_Mobat', axis=1)
-            y = df['score_average_Mobat']
             mutual_info = np.array(mutual_info_regression(X, y))
-            mutual_info = handle_infinite_values(mutual_info) 
+            mutual_info = handle_infinite_values(mutual_info)
             data = {X.columns[i]: mutual_info[i] for i in range(len(mutual_info))}
 
         elif technique == 'correlation':
-            correlation_matrix = df.corr()
-            target_correlations = correlation_matrix['score_average_Mobat']
+            correlation_matrix = X.corr()
+            target_correlations = correlation_matrix.get('score_average_Mobat', pd.Series())
             correlations = np.array(target_correlations)
-            correlations = handle_infinite_values(correlations) 
+            correlations = handle_infinite_values(correlations)
             data = {target_correlations.index[i]: correlations[i] for i in range(len(correlations))}
 
         else:
@@ -1246,21 +1252,25 @@ class CountryScoreAverageView(APIView):
             return Response({'error': f'Erro ao processar os dados: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class TopIPsScoreAverageAPIView(APIView):
-    def plot_top_ips_score_average(self, df, num_ips):
-        df['score_average_Mobat'] = pd.to_numeric(df['score_average_Mobat'], errors='coerce')
-        df = df.dropna(subset=['score_average_Mobat'])
+    def plot_top_ips_score_average(self, df, num_ips, feature):
+        df[feature] = pd.to_numeric(df[feature], errors='coerce')
+        df = df.dropna(subset=[feature])
 
         top_ips = df['IP'].value_counts().nlargest(num_ips).index
         ip_variations = []
         for ip in top_ips:
             ip_data = df[df['IP'] == ip]
-            score_variation = ip_data['score_average_Mobat'].max() - ip_data['score_average_Mobat'].min()
+            max_score = ip_data[feature].max()
+            min_score = ip_data[feature].min()
+            score_variation = max_score - min_score
+
             ip_variations.append({
                 'IP': ip,
-                'ScoreVariation': score_variation,
-                'MaxScore': ip_data['score_average_Mobat'].max(),
-                'MinScore': ip_data['score_average_Mobat'].min()
+                'ScoreVariation': round(score_variation, 1),
+                'MaxScore': round(max_score, 1),
+                'MinScore': round(min_score, 1)
             })
+
         ip_variations_sorted = sorted(ip_variations, key=lambda x: x['ScoreVariation'], reverse=True)
 
         return ip_variations_sorted
@@ -1281,6 +1291,19 @@ class TopIPsScoreAverageAPIView(APIView):
                 openapi.IN_QUERY,
                 description="Number of IPs to analyze",
                 type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'feature',
+                openapi.IN_QUERY,
+                description="Feature to use for ranking IPs",
+                type=openapi.TYPE_STRING,
+                enum=[
+                    'abuseipdb_confidence_score', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+                    'virustotal_reputation', 'harmless', 'malicious', 'suspicious', 'undetected',
+                    'IBM_score', 'IBM_average history Score', 'IBM_most common score', 
+                    'ALIENVAULT_reputation', 'score_average_Mobat'
+                ],
                 required=True
             ),
             openapi.Parameter(
@@ -1308,9 +1331,9 @@ class TopIPsScoreAverageAPIView(APIView):
             openapi.Parameter(
                 'semester',
                 openapi.IN_QUERY,
-                description="Semester to filter data ('Primeiro' or 'Segundo')",
+                description="Semester to filter data ('First' or 'Second')",
                 type=openapi.TYPE_STRING,
-                enum=['Primeiro', 'Segundo'],
+                enum=['First', 'Second'],
                 required=False
             ),
             openapi.Parameter(
@@ -1325,7 +1348,16 @@ class TopIPsScoreAverageAPIView(APIView):
     )
     def get(self, request):
         num_ips = int(request.query_params.get('num_ips', 5))
+        feature = request.query_params.get('feature')
         view = request.query_params.get('view', 'json')
+
+        if feature not in [
+            'abuseipdb_confidence_score', 'abuseipdb_total_reports', 'abuseipdb_num_distinct_users',
+            'virustotal_reputation', 'harmless', 'malicious', 'suspicious', 'undetected',
+            'IBM_score', 'IBM_average history Score', 'IBM_most common score',
+            'ALIENVAULT_reputation', 'score_average_Mobat'
+        ]:
+            return Response({'error': 'Invalid feature chosen'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             table_choice_enum = TableChoice.TOTAL
@@ -1346,22 +1378,22 @@ class TopIPsScoreAverageAPIView(APIView):
             query_params = []
 
             if year and month and day:
-                query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
+                query = f"SELECT IP, {feature} FROM {table_name} WHERE strftime('%Y-%m-%d', Time) = ?"
                 query_params = [f"{year}-{month:02}-{day:02}"]
             elif year and month:
-                query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
+                query = f"SELECT IP, {feature} FROM {table_name} WHERE strftime('%Y-%m', Time) = ?"
                 query_params = [f"{year}-{month:02}"]
             elif year:
                 if semester:
-                    if semester == 'Primeiro':
-                        query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
-                    elif semester == 'Segundo':
-                        query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
+                    if semester == 'First':
+                        query = f"SELECT IP, {feature} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '01' AND '06'"
+                    elif semester == 'Second':
+                        query = f"SELECT IP, {feature} FROM {table_name} WHERE strftime('%Y', Time) = ? AND strftime('%m', Time) BETWEEN '07' AND '12'"
                     else:
                         return Response({'error': 'Invalid semester chosen'}, status=status.HTTP_400_BAD_REQUEST)
                     query_params = [f"{year}"]
                 else:
-                    query = f"SELECT IP, score_average_Mobat FROM {table_name} WHERE strftime('%Y', Time) = ?"
+                    query = f"SELECT IP, {feature} FROM {table_name} WHERE strftime('%Y', Time) = ?"
                     query_params = [f"{year}"]
             else:
                 return Response({'error': 'At least the year parameter must be provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1369,10 +1401,10 @@ class TopIPsScoreAverageAPIView(APIView):
             data = cursor.execute(query, query_params).fetchall()
             conn.close()
 
-            columns = ['IP', 'score_average_Mobat']
+            columns = ['IP', feature]
             df = pd.DataFrame(data, columns=columns)
 
-            top_ips_data = self.plot_top_ips_score_average(df, num_ips)
+            top_ips_data = self.plot_top_ips_score_average(df, num_ips, feature)
 
             if view == 'csv':
                 return self.export_to_csv(top_ips_data)
@@ -1390,7 +1422,6 @@ class DataProcessingAPIView(APIView):
             y = df['score_average_Mobat']
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
             
-            # Feature selection methods
             vt = VarianceThreshold()
             X_train_vt = vt.fit_transform(X_train)
             X_test_vt = vt.transform(X_test)
@@ -1737,3 +1768,149 @@ class DispersaoFeaturesAPIView(APIView):
 
         except Exception as e:   
             return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class BlacklistAPIView(APIView):
+    @staticmethod
+    def get_available_years_months():
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query = f"SELECT DISTINCT strftime('%Y', Time) AS year FROM {table_name}"
+            result = cursor.execute(query).fetchall()
+
+            conn.close()
+
+            available_years = [row[0] for row in result]
+            return available_years
+
+        except Exception as e:
+            print(f'Erro ao obter anos disponíveis: {str(e)}')
+            return []
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                'year',
+                openapi.IN_QUERY,
+                description="Year to filter the data",
+                type=openapi.TYPE_STRING,
+                enum=get_available_years_months(),
+                required=True
+            ),
+            openapi.Parameter(
+                'month',
+                openapi.IN_QUERY,
+                description="Month to filter the data",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'day',
+                openapi.IN_QUERY,
+                description="Day to filter the data",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'semester',
+                openapi.IN_QUERY,
+                description="Semester to filter the data ('First' or 'Second')",
+                type=openapi.TYPE_STRING,
+                enum=['First', 'Second'],
+                required=False
+            ),
+            openapi.Parameter(
+                'view',
+                openapi.IN_QUERY,
+                description="Response format (json or csv)",
+                type=openapi.TYPE_STRING,
+                enum=['csv', 'json'],
+                default='json'
+            )
+        ]
+    )
+    def get(self, request):
+        year = request.query_params.get('year')
+        month = request.query_params.get('month')
+        day = request.query_params.get('day')
+        semester = request.query_params.get('semester')
+        view = request.query_params.get('view', 'json')
+
+        if not year:
+            return Response({'error': 'Parâmetro year é obrigatório'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            table_choice_enum = TableChoice.TOTAL
+            table_name = table_choice_enum.value
+            db_path = TableChoice.get_db_path(table_name)
+            if not db_path:
+                raise KeyError
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            query, query_params = self.build_query(year, month, day, semester)
+
+            if not query:
+                return Response({'error': 'Pelo menos o parâmetro year deve ser fornecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+            data = cursor.execute(query, query_params).fetchall()
+            columns = [description[0] for description in cursor.description]
+            df = pd.DataFrame(data, columns=columns)
+            conn.close()
+
+            blacklist_ips = self.filter_ips(df)
+
+            if view == 'csv':
+                csv_buffer = BytesIO()
+                pd.DataFrame(blacklist_ips, columns=['IP']).to_csv(csv_buffer, index=False)
+                csv_buffer.seek(0)
+
+                response = HttpResponse(csv_buffer.getvalue(), content_type='text/csv')
+                response['Content-Disposition'] = 'attachment; filename="blacklist_ips.csv"'
+                return response
+            else:
+                return Response({'blacklist_ips': blacklist_ips})
+
+        except Exception as e:
+            print(f'Erro ao obter dados do banco: {str(e)}')
+            return Response({'error': f'Erro ao obter dados do banco: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def build_query(self, year, month, day, semester):
+        query = f"SELECT IP, score_average_Mobat, Time FROM TOTAL"
+        filters = ["strftime('%Y', Time) = ?"]
+        query_params = [year]
+
+        if semester:
+            if semester == 'First':
+                filters.append("strftime('%m', Time) BETWEEN '01' AND '06'")
+            elif semester == 'Second':
+                filters.append("strftime('%m', Time) BETWEEN '07' AND '12'")
+
+        if month:
+            filters.append("strftime('%m', Time) = ?")
+            query_params.append(f"{int(month):02}")
+
+        if day:
+            filters.append("strftime('%d', Time) = ?")
+            query_params.append(f"{int(day):02}")
+
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+
+        return query, query_params
+
+    def filter_ips(self, df):
+        low_average_ips = df[df['score_average_Mobat'] < 50]['IP'].unique()
+        var_threshold = df.groupby('IP')['score_average_Mobat'].var()
+        high_variance_ips = var_threshold[var_threshold >= 10].index.tolist()
+        unique_blacklist_ips = list(set(low_average_ips) | set(high_variance_ips))
+        return unique_blacklist_ips
+

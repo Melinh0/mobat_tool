@@ -11,5 +11,6 @@ urlpatterns = [
     path('top-ips-score-average/', views.TopIPsScoreAverageAPIView.as_view(), name='top-ips-score-average'),
     path('data-processing/', views.DataProcessingAPIView.as_view(), name='data-processing'),  
     path('dispersao-features/', views.DispersaoFeaturesAPIView.as_view(), name='dispersao-features'),  
+    path('blacklist/', views.BlacklistAPIView.as_view(), name='blacklist'),  
 
 ]
